@@ -3246,7 +3246,7 @@ if __name__ == "__main__":
         
         # does two passes through the file
         # assumes data file is all for one date, sorted in time order, in correct format, etc. etc.
-        rwd_csv = csv.reader(open(filename, 'r'))
+        rwd_csv = csv.reader(open("data//"+filename, 'r'))
         
         # first pass: get time & price events, find out how long session is, get min & max price
         minprice = None
@@ -3462,7 +3462,7 @@ if __name__ == "__main__":
     #         trdr_3_n = min_n
     #         while trdr_3_n <= n_traders - (trdr_1_n + trdr_2_n):
     #             trdr_4_n = n_traders - (trdr_1_n + trdr_2_n + trdr_3_n)
-    #             if trdr_4_n >= min_n:
+    #             if trdr_4_n >= min_n:    rwd_csv = csv.reader(open(filename, 'r'))
     #                 buyers_spec = [('GVWY', trdr_1_n), ('SHVR', trdr_2_n),
     #                                ('ZIC', trdr_3_n), ('ZIP', trdr_4_n)]
     #                 sellers_spec = buyers_spec
