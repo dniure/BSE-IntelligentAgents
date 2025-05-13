@@ -59,7 +59,6 @@ import csv
 from datetime import datetime
 import numpy as np
 
-
 # a bunch of system constants (globals)
 bse_sys_minprice = 1                    # minimum price in the system, in cents/pennies
 bse_sys_maxprice = 500                  # maximum price in the system, in cents/pennies
@@ -81,12 +80,12 @@ class Order:
         self.price = price  # price
         self.qty = qty  # quantity
         self.time = time  # timestamp
-        self.qid = qid if qid is not None else 0  # quote i.d. (unique to each quote)
+        self.qid = qid  # quote i.d. (unique to each quote)
 
     def __str__(self):
         return '[%s %s P=%03d Q=%s T=%5.2f QID:%d]' % \
                (self.tid, self.otype, self.price, self.qty, self.time, self.qid)
-        
+
 
 class OrderbookHalf:
     """
@@ -252,6 +251,13 @@ class Orderbook(OrderbookHalf):
         self.quote_id = 0           # unique ID code for each quote accepted onto the book
         self.lob_string = ''        # character-string linearization of public lob items with nonzero quantities
 
+## NEW ADDITION
+def add_noise_to_price(price, noise_level):
+    """Add Gaussian noise to an order price, clipped to system min/max."""
+    noise = random.gauss(0, noise_level * price)
+    noisy_price = int(round(price + noise))
+    noisy_price = max(bse_sys_minprice, min(bse_sys_maxprice, noisy_price))
+    return noisy_price
 
 class Exchange(Orderbook):
     """  Exchange's matching engine and limit order book"""
@@ -407,52 +413,79 @@ class Exchange(Orderbook):
             return None
 
     def tape_dump(self, fname, fmode, tmode):
-        """
-        Currently tape_dump only writes a list of transactions (i.e., it ignores any cancellations)
-        :param fname: filename to write to.
-        :param fmode: file-open write/append mode.
-        :param tmode: if set to 'wipe', wipes the tape clean after writing it to file.
-        :return:
-        """
-        dumpfile = open(fname, fmode)
-        dumpfile.write('Event Type, Time, Price\n')
-        for tapeitem in self.tape:
-            if tapeitem['type'] == 'Trade':
-                dumpfile.write('Trd, %010.3f, %s\n' % (tapeitem['time'], tapeitem['price']))
-        dumpfile.close()
+        with open(fname, fmode) as dumpfile:
+            dumpfile.write('Event Type, Time, Price\n')
+            batch_size = 1000
+            for i in range(0, len(self.tape), batch_size):
+                batch = self.tape[i:i + batch_size]
+                for tapeitem in batch:
+                    if tapeitem['type'] == 'Trade':
+                        dumpfile.write('Trd, %010.3f, %s\n' % (tapeitem['time'], tapeitem['price']))
+                dumpfile.flush()
         if tmode == 'wipe':
             self.tape = []
 
-def publish_lob(self, time, lob_file, vrbs):
-    public_data = dict()
-    public_data['time'] = time
-    public_data['bids'] = {'best': self.bids.best_price, 'worst': self.bids.worstprice,
-                           'n': self.bids.n_orders, 'lob': self.bids.lob_anon}
-    public_data['asks'] = {'best': self.asks.best_price, 'worst': self.asks.worstprice,
-                           'sess_hi': self.asks.session_extreme, 'n': self.asks.n_orders,
-                           'lob': self.asks.lob_anon}
-    public_data['QID'] = self.quote_id
-    public_data['tape'] = self.tape
+    def publish_lob(self, time, lob_file, vrbs):
+        """
+        Returns the public LOB data published by the exchange, 
+        i.e. the version of the LOB that's accessible to the traders.
+        :param time: the current time.
+        :param lob_file: 
+        :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
+        :return: the public LOB data.
+        """
+        public_data = dict()
+        public_data['time'] = time
+        public_data['bids'] = {'best': self.bids.best_price,
+                               'worst': self.bids.worstprice,
+                               'n': self.bids.n_orders,
+                               'lob': self.bids.lob_anon}
+        public_data['asks'] = {'best': self.asks.best_price,
+                               'worst': self.asks.worstprice,
+                               'sess_hi': self.asks.session_extreme,
+                               'n': self.asks.n_orders,
+                               'lob': self.asks.lob_anon}
+        public_data['QID'] = self.quote_id
+        public_data['tape'] = self.tape
 
-    if lob_file is not None:
-        # Convert lob_anon to DataFrame
-        bids_df = pd.DataFrame(self.bids.lob_anon, columns=['bid_price', 'bid_qty']).astype({'bid_price': 'int32', 'bid_qty': 'int16'})
-        asks_df = pd.DataFrame(self.asks.lob_anon, columns=['ask_price', 'ask_qty']).astype({'ask_price': 'int32', 'ask_qty': 'int16'})
-        lob_df = pd.DataFrame({
-            'time': time,
-            'best_bid': pd.Series(self.bids.best_price, dtype='int32'),
-            'best_ask': pd.Series(self.asks.best_price, dtype='int32'),
-            'n_bids': pd.Series(self.bids.n_orders, dtype='int16'),
-            'n_asks': pd.Series(self.asks.n_orders, dtype='int16')
-        })
-        lob_df.to_csv(lob_file, mode='a', header=not lob_file.tell(), index=False)
+        if lob_file is not None and int(time) % 10 == 0:  # Write LOB frame every 10 seconds
+            # build a linear character-string summary of only those prices on LOB with nonzero quantities
+            lobstring = 'Bid:,'
+            n_bids = len(self.bids.lob_anon)
+            if n_bids > 0:
+                lobstring += '%d,' % n_bids
+                for lobitem in self.bids.lob_anon:
+                    price_str = '%d,' % lobitem[0]
+                    qty_str = '%d,' % lobitem[1]
+                    lobstring = lobstring + price_str + qty_str
+            else:
+                lobstring += '0,'
+            lobstring += 'Ask:,'
+            n_asks = len(self.asks.lob_anon)
+            if n_asks > 0:
+                lobstring += '%d,' % n_asks
+                for lobitem in self.asks.lob_anon:
+                    price_str = '%d,' % lobitem[0]
+                    qty_str = '%d,' % lobitem[1]
+                    lobstring = lobstring + price_str + qty_str
+            else:
+                lobstring += '0,'
+            # is this different to the last lob_string?
+            if lobstring != self.lob_string:
+                # write it
+                lob_file.write('%.3f, %s\n' % (time, lobstring))
+                # remember it
+                self.lob_string = lobstring
 
-    if vrbs:
-        vstr = f'publish_lob: t={time:.1f} BID_lob={public_data["bids"]["lob"]} ASK_lob={public_data["asks"]["lob"]}'
-        print(vstr)
+        if vrbs:
+            vstr = 'publish_lob: t=%f' % time
+            vstr += ' BID_lob=%s' % public_data['bids']['lob']
+            # vstr += 'best=%s; worst=%s; n=%s ' % (self.bids.best_price, self.bids.worstprice, self.bids.n_orders)
+            vstr += ' ASK_lob=%s' % public_data['asks']['lob']
+            # vstr += 'qid=%d' % self.quote_id
+            print(vstr)
 
-    return public_data    
-
+        return public_data
 
 
 # #################--Traders below here--#############
@@ -492,15 +525,18 @@ class Trader:
         return '[TID %s type %s balance %s blotter %s orders %s n_trades %s profitpertime %s]' \
                % (self.tid, self.ttype, self.balance, self.blotter, self.orders, self.n_trades, self.profitpertime)
 
-    def add_order(self, time, order, vrbs):
+    def add_order(self, order, vrbs):
         """
         What a trader calls when it receives a new customer order/assignment
-        :param time: the current time
         :param order: the customer order/assignment to be added
         :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
         :return response: string to indicate whether the trader needs to cancel its current order on the LOB
         """
+        # in this version, trader has at most one order,
+        # if allow more than one, this needs to be self.orders.append(order)
         if self.n_quotes > 0:
+            # this trader has a live quote on the LOB, from a previous customer order
+            # need response to signal cancellation/withdrawal of that quote
             response = 'LOB_Cancel'
         else:
             response = 'Proceed'
@@ -508,7 +544,6 @@ class Trader:
         if vrbs:
             print('add_order < response=%s' % response)
         return response
-    
 
     def del_order(self, order):
         """What a trader calls when it wants to delete an existing customer order/assignment """
@@ -821,7 +856,7 @@ class TraderPRZI(Trader):
         :param time: the current time.
         """
 
-        vrbs = True
+        vrbs = False
 
         Trader.__init__(self, ttype, tid, balance, params, time)
 
@@ -2641,7 +2676,7 @@ class TraderRLAgent(Trader):
         self.q_table = np.zeros((2, 3, 3))  # Trend (up/down), balance (low/med/high), actions (buy/sell/hold)
         self.lr = 0.1
         self.gamma = 0.9
-        self.epsilon = 0.3
+        self.epsilon = 0.5
         self.last_state = None
         self.last_action = None
 
@@ -2736,7 +2771,7 @@ class TraderRLAgent(Trader):
                 reward + self.gamma * np.max(self.q_table[next_state[0], next_state[1]]) - 
                 self.q_table[trend, balance_bin, self.last_action]
             )
-            self.epsilon *= 0.99
+            self.epsilon = max(0.1, self.epsilon * 0.999)  # Slower decay, minimum 0.1
         
         if vrbs:
             net_worth = self.balance
@@ -2746,31 +2781,75 @@ class TraderRLAgent(Trader):
         self.del_order(order)
 
 
+## NEW ADDITION
+class TraderNoise(Trader):
+    """Trader that adds noise to ZIC strategy prices."""
+    def getorder(self, time, countdown, lob):
+        if countdown < 0:
+            sys.exit('Negative countdown')
+        
+        if len(self.orders) < 1:
+            order = None
+        else:
+            minprice = lob['bids']['worst']
+            maxprice = lob['asks']['worst']
+            qid = lob['QID']
+            limit = self.orders[0].price
+            otype = self.orders[0].otype
+            if otype == 'Bid':
+                quoteprice = random.randint(int(minprice), int(limit))
+            else:
+                quoteprice = random.randint(int(limit), int(maxprice))
+            # Add noise to quote price
+            quoteprice = add_noise_to_price(quoteprice, noise_level=0.05)
+            order = Order(self.tid, otype, quoteprice, self.orders[0].qty, time, qid)
+            self.lastquote = order
+        return order
+    
 # ########################---trader-types have all been defined now--################
 
 
 # #########################---Below lies the experiment/test-rig---##################
 
 
-def trade_stats(expid, traders, dumpfile, time, lob):
+def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
+    # Analyse the set of traders, to see what types we have
     trader_types = {}
-    n_traders = len(traders)
     for t in traders:
         ttype = traders[t].ttype
-        if ttype in trader_types:
+        if ttype in trader_types.keys():
             t_balance = trader_types[ttype]['balance_sum'] + traders[t].balance
-            t_n = trader_types[ttype]['n'] + 1
-            trader_types[ttype] = {'n': t_n, 'balance_sum': t_balance}
+            n = trader_types[ttype]['n'] + 1
         else:
-            trader_types[ttype] = {'n': 1, 'balance_sum': traders[t].balance}
-    dumpfile.write(f'{expid}, {time:06d}, ')
-    dumpfile.write(f'{lob["bids"]["best"] if lob["bids"]["n"] > 0 else "None"}, ')
-    dumpfile.write(f'{lob["asks"]["best"] if lob["asks"]["n"] > 0 else "None"}, ')
-    for ttype in sorted(trader_types.keys()):
+            t_balance = traders[t].balance
+            n = 1
+        trader_types[ttype] = {'n': n, 'balance_sum': t_balance}
+
+    # Buffer output
+    if buffer is None:
+        buffer = []
+    line = f'{expid}, {time:06d}, '
+    if lob['bids']['best'] is not None:
+        line += f'{lob["bids"]["best"]}, '
+    else:
+        line += 'None, '
+    if lob['asks']['best'] is not None:
+        line += f'{lob["asks"]["best"]}, '
+    else:
+        line += 'None, '
+    for ttype in sorted(list(trader_types.keys())):
         n = trader_types[ttype]['n']
-        bal = trader_types[ttype]['balance_sum']
-        dumpfile.write(f'{ttype}, {n}, {bal}, {bal/n:.2f}, ')
-    dumpfile.write('\n')
+        s = trader_types[ttype]['balance_sum']
+        line += f'{ttype}, {s}, {n}, {s / float(n)}, '
+    line += '\n'
+    buffer.append(line)
+
+    # Flush buffer if large
+    if len(buffer) >= 100:
+        dumpfile.writelines(buffer)
+        dumpfile.flush()
+        buffer.clear()
+    return buffer
 
 def populate_market(trdrs_spec, traders, shuffle, vrbs):
     """
@@ -2785,16 +2864,11 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
     # trdrs_spec is a list of buyer-specs and a list of seller-specs
     # each spec is (<trader type>, <number of this type of trader>, optionally: <params for this type of trader>)
 
+    ## NEW MODIFICATION 
     def trader_type(robottype, name, parameters):
-        """
-        Create a newly instantiated trader of the designated type.
-        :param robottype: the 'ticker-symbol' abbreviation indicating what type of trader to create.
-        :param name: this trader's trader-I.D. character string.
-        :param parameters: a list of parameter values for this trader-type.
-        :return: a newly created trader of the designated type.
-        """
+        """Create a newly instantiated trader of the designated type."""
         balance = 0.00
-        proptrader_balance = 500  # marketmakers start with zero inventory and a balance of $500
+        proptrader_balance = 500
         time0 = 0
         if robottype == 'GVWY':
             return TraderGiveaway('GVWY', name, balance, parameters, time0)
@@ -2818,6 +2892,8 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
             return TraderPT1('PT1', name, proptrader_balance, parameters, time0)
         elif robottype == 'PT2':
             return TraderPT2('PT2', name, proptrader_balance, parameters, time0)
+        elif robottype == 'NOISE':
+            return TraderNoise('NOISE', name, balance, parameters, time0)
         elif robottype == 'TrendFollower':
             return TraderTrendFollower('TrendFollower', name, proptrader_balance, parameters, time0)
         elif robottype == 'MeanReverter':
@@ -2825,8 +2901,8 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
         elif robottype == 'RLAgent':
             return TraderRLAgent('RLAgent', name, proptrader_balance, parameters, time0)
         else:
-            sys.exit('FATAL: don\'t know trader type %s\n' % robottype)
-
+            sys.exit('FATAL: don\'t know trader type %s\n' % robottype)        
+            
     def shuffle_traders(ttype_char, n, trader_list):
         """
         Shuffles the trader-I.D. character strings of the traders in trader_list
@@ -2967,43 +3043,96 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
 
     return {'n_buyers': n_buyers, 'n_sellers': n_sellers, 'n_proptraders': n_proptraders}
 
-def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level):
+def dump_strats_frame(time, strat_dump, traders):
+    strat_dump.write(f"{time},")
+    for t in traders:
+        if hasattr(traders[t], 'strat_str'):
+            strat_dump.write(traders[t].strat_str().replace('\n', ';') + ',')
+        else:
+            strat_dump.write('None,')
+    strat_dump.write('\n')
+
+def blotter_dump(sess_id, traders):
+    for t in traders:
+        blotter_file = open(f'{sess_id}_{t}_blotter.csv', 'w')
+        blotter_file.write('Time,Price,Qty,Party1,Party2\n')
+        for trade in traders[t].blotter:
+            if trade['type'] == 'Trade':
+                blotter_file.write(f"{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
+        blotter_file.close()
+
+def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level=0.05):
+    """
+    Generate a list of new customer-orders to be issued to the traders in the immediate/near future,
+    and a list of any existing customer-orders that need to be cancelled because they are overridden by new ones.
+    :param time: the current time.
+    :param traders: the population of traders.
+    :param trader_stats: summary statistics about the population of traders.
+    :param orders_sched: the supply/demand schedule from which the orders will be generated...
+            os['timemode'] is either 'periodic', 'drip-fixed', 'drip-jitter', or 'drip-poisson';
+            os['interval'] is number of seconds for a full cycle of replenishment;
+            drip-poisson sequences will be normalised to ensure time of last replenishment <= interval.
+            If a supply or demand schedule mode is "random" and more than one range is supplied in ranges[],
+            then each time a price is generated one of the ranges is chosen equiprobably and the price is
+            then generated uniform-randomly from that range.
+            if len(range)==2, interpreted as min and max values on the schedule, specifying linear supply/demand curve.
+            if len(range)==3, first two vals are min & max for linear sup/dem curves, and third value should be a
+            callable function that generates a dynamic price offset; he offset value applies equally to the min & max,
+            so gradient of linear sup/dem curves doesn't vary, but equilibrium price does.
+            if len(range)==4, the third value is function that gives dynamic offset for schedule min, and 4th is a
+            function giving dynamic offset for schedule max, so gradient of sup/dem linear curve can vary dynamically
+            along with the varying equilibrium price.
+    :param pending: the list of currently pending future orders if this is empty, generates a new one).
+    :param vrbs: verbosity Boolean: if True, print a running commentary; if False, stay silent.
+    :return: [new_pending, cancellations]:
+            new_pending is list of new orders to be issued;
+            cancellations is list of previously-issued orders now cancelled.
+    """
+
     def sysmin_check(price):
+        """ if price is less than system minimum price, issue a warning and clip the price to the minimum"""
         if price < bse_sys_minprice:
-            print('WARNING: price < bse_sys_minprice in customer_orders()')
+            print('WARNING: price < bse_sys_min -- clipped')
             price = bse_sys_minprice
         return price
 
     def sysmax_check(price):
+        """ if price is greater than system maximum price, issue a warning and clip the price to the maximum"""
         if price > bse_sys_maxprice:
-            print('WARNING: price > bse_sys_maxprice in customer_orders()')
+            print('WARNING: price > bse_sys_max -- clipped')
             price = bse_sys_maxprice
         return price
 
+    ## NEW MODIFICATION
     def getorderprice(i, schedules, n, stepmode, orderissuetime):
-        order_price = None
-        pmin = None
-        pmax = None
-        if len(schedules[0]) == 3:
-            offsetfn = schedules[0][2][0]
-            offsetfn_params = schedules[0][2][1]
-            pmin = sysmin_check(min(schedules[0][0], schedules[0][1]) + offsetfn(orderissuetime, offsetfn_params))
-            pmax = sysmax_check(max(schedules[0][0], schedules[0][1]) + offsetfn(orderissuetime, offsetfn_params))
-        elif len(schedules[0]) == 4:
-            offsetfn_low = schedules[0][2][0]
-            offsetfn_high = schedules[0][3][0]
-            offsetfn_params = schedules[0][2][1]
-            pmin = sysmin_check(min(schedules[0][0], schedules[0][1]) + offsetfn_low(orderissuetime, offsetfn_params))
-            pmax = sysmax_check(max(schedules[0][0], schedules[0][1]) + offsetfn_high(orderissuetime, offsetfn_params))
+        """Generate a price for an order with added noise."""
+        if len(schedules[0]) > 2:
+            offsetfn = schedules[0][2]
+            if callable(offsetfn[0]):
+                offset_min = offsetfn[0](orderissuetime, *offsetfn[1])
+                offset_max = offset_min
+            else:
+                sys.exit('FAIL: 3rd argument of sched in getorderprice() not callable')
+            if len(schedules[0]) > 3:
+                offsetfn = schedules[0][3]
+                if callable(offsetfn):
+                    offset_max = offsetfn(orderissuetime)
+                else:
+                    sys.exit('FAIL: 4th argument of sched in getorderprice() not callable')
         else:
-            pmin = sysmin_check(min(schedules[0][0], schedules[0][1]))
-            pmax = sysmax_check(max(schedules[0][0], schedules[0][1]))
+            offset_min = 0.0
+            offset_max = 0.0
+
+        pmin = sysmin_check(offset_min + min(schedules[0][0], schedules[0][1]))
+        pmax = sysmax_check(offset_max + max(schedules[0][0], schedules[0][1]))
         prange = pmax - pmin
-        stepsize = prange / n
+        stepsize = prange / (n - 1)
+        halfstep = round(stepsize / 2.0)
+
         if stepmode == 'fixed':
-            order_price = int(pmin + int(i * stepsize))
+            order_price = pmin + int(i * stepsize)
         elif stepmode == 'jittered':
-            order_price = int(pmin + int(i * stepsize) + random.randint(-int(stepsize / 2), int(stepsize / 2)))
+            order_price = pmin + int(i * stepsize) + random.randint(-halfstep, halfstep)
         elif stepmode == 'random':
             if len(schedules) > 1:
                 s = random.randint(0, len(schedules) - 1)
@@ -3011,203 +3140,156 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
                 pmax = sysmax_check(max(schedules[s][0], schedules[s][1]))
             order_price = random.randint(int(pmin), int(pmax))
         else:
-            sys.exit('FATAL: bad stepmode in customer_orders()\n')
-        # Add Gaussian noise
+            sys.exit('FAIL: Unknown mode in schedule')
+        
+        # Step 2.1: Add noise to the order price
         if noise_level > 0:
-            range_width = pmax - pmin
-            noise_std = noise_level * range_width
-            order_price += int(np.random.normal(0, noise_std))
-        order_price = sysmin_check(sysmax_check(order_price))
-        return order_price
+            order_price = add_noise_to_price(order_price, noise_level)
+        
+        return sysmin_check(sysmax_check(order_price))
 
     def getissuetimes(n_traders, timemode, interval, shuffle, fittointerval):
+        """
+        Generate a list of issue/arrival times for a set of future customer-orders, over a specified time-interval.
+        :param n_traders: how many traders need issue times (i.e., the number of customer orders to be generated)
+        :param timemode: character-string specifying the temporal spacing of orders:
+                timemode=='periodic'=> orders issued to all traders at the same instant in time, every time-interval;
+                timemode=='drip-fixed'=> order interarrival time is exactly one timestep, for all orders;
+                timemode=='drip-jitter'=> order interarrival time is (1+r)*timestep, r=U[0,timestep], for all orders;
+                timemode=='drip-poisson'=> order interarrival time is a Poisson random process, for all orders.
+        :param interval: the time-interval between successive order issuals/arrivals.
+        :param shuffle: if True then shuffle the arrival times, randomising the sequence in which traders get orders.
+        :param fittointerval: if True then final order arrives at exactly t+interval; else may be slightly later.
+        :return: the list of issue times.
+        """
         interval = float(interval)
         if n_traders < 1:
-            sys.exit('FATAL: n_traders < 1 in getissuetimes()\n')
+            sys.exit('FAIL: n_traders < 1 in getissuetime()')
         elif n_traders == 1:
             tstep = interval
         else:
             tstep = interval / (n_traders - 1)
-        issuetimes = []
-        t = 0.0
-        for trader in range(0, n_traders):
+        arrtime = 0
+        issue_times = []
+        for trdr in range(n_traders):
             if timemode == 'periodic':
-                t = interval
+                arrtime = interval
             elif timemode == 'drip-fixed':
-                t = tstep * trader
+                arrtime = trdr * tstep
             elif timemode == 'drip-jitter':
-                t = tstep * trader + tstep * random.random()
+                arrtime = trdr * tstep + tstep * random.random()
             elif timemode == 'drip-poisson':
-                if trader == 0:
-                    t = interval * random.random()
-                else:
-                    t += interval * np.random.exponential(scale=1.0 / n_traders)
+                # poisson requires a bit of extra work
+                interarrivaltime = random.expovariate(n_traders / interval)
+                arrtime += interarrivaltime
             else:
-                sys.exit('FATAL: unknown timemode in getissuetimes()\n')
-            issuetimes.append(t)
-        if fittointerval:
-            for trader in range(0, n_traders):
-                issuetimes[trader] = issuetimes[trader] * interval / issuetimes[n_traders - 1]
+                sys.exit('FAIL: unknown time-mode in getissuetimes()')
+            issue_times.append(arrtime)
+            # at this point, arrtime is the last arrival time
+
+        if fittointerval and ((arrtime > interval) or (arrtime < interval)):
+            # generated sum of interarrival times longer than the interval
+            # squish them back so that last arrival falls at t=interval
+            for trdr in range(n_traders):
+                issue_times[trdr] = interval * (issue_times[trdr] / arrtime)
+        # optionally randomly shuffle the times
         if shuffle:
-            for trader in range(0, n_traders):
-                i = random.randint(0, n_traders - 1)
-                t = issuetimes[trader]
-                issuetimes[trader] = issuetimes[i]
-                issuetimes[i] = t
-        return issuetimes
+            for trdr in range(n_traders):
+                i = (n_traders - 1) - trdr
+                j = random.randint(0, i)
+                tmp = issue_times[i]
+                issue_times[i] = issue_times[j]
+                issue_times[j] = tmp
+        return issue_times
 
     def getschedmode(t_now, order_schedules):
-        for sched in order_schedules:
-            if (sched['from'] <= t_now) and (t_now <= sched['to']):
-                return sched['ranges'], sched['stepmode']
-        sys.exit('FATAL: t_now=%f not within any sched in getschedmode()\n' % t_now)
+        """
+        return the step-mode for supply/demand schedule at the current time
+        :param t_now: the current time
+        :param order_schedules: dictionary/list of order schedules
+        :return: schedrange = the price range for this schedule; mode= the stepmode for this schedule
+        """
+        got_one = False
+        schedrange = None
+        stepmode = None
+        for schedule in order_schedules:
+            if (schedule['from'] <= t_now) and (t_now < schedule['to']):
+                # within the timezone for this schedule
+                schedrange = schedule['ranges']
+                stepmode = schedule['stepmode']
+                got_one = True
+                break  # jump out the loop -- so the first matching timezone has priority over any others
+        if not got_one:
+            sys.exit('Fail: time=%5.2f not within any timezone in order_schedules=%s' % (t_now, order_schedules))
+        return schedrange, stepmode
 
     n_buyers = trader_stats['n_buyers']
     n_sellers = trader_stats['n_sellers']
+
     shuffle_times = True
+
     cancellations = []
+
     if len(pending) < 1:
+        # list of pending (to-be-issued) customer orders is empty, so generate a new one
         new_pending = []
-        # Buyers
+
+        # demand side (buyers)
         issuetimes = getissuetimes(n_buyers, orders_sched['timemode'], orders_sched['interval'], shuffle_times, True)
-        sched, stepmode = getschedmode(time, orders_sched['dem'])
+
+        ordertype = 'Bid'
+        (sched, mode) = getschedmode(time, orders_sched['dem'])
         for t in range(n_buyers):
+            issuetime = time + issuetimes[t]
             tname = 'B%02d' % t
-            orderprice = getorderprice(t, sched, n_buyers, stepmode, time + issuetimes[t])
-            order = Order(tname, 'Bid', orderprice, 1, time + issuetimes[t], None)
+            orderprice = getorderprice(t, sched, n_buyers, mode, issuetime)
+            order = Order(tname, ordertype, orderprice, 1, issuetime, chrono.time())
             new_pending.append(order)
-        # Sellers
+
+        # supply side (sellers)
         issuetimes = getissuetimes(n_sellers, orders_sched['timemode'], orders_sched['interval'], shuffle_times, True)
-        sched, stepmode = getschedmode(time, orders_sched['sup'])
+        ordertype = 'Ask'
+        (sched, mode) = getschedmode(time, orders_sched['sup'])
         for t in range(n_sellers):
+            issuetime = time + issuetimes[t]
             tname = 'S%02d' % t
-            orderprice = getorderprice(t, sched, n_sellers, stepmode, time + issuetimes[t])
-            order = Order(tname, 'Ask', orderprice, 1, time + issuetimes[t], None)
+            orderprice = getorderprice(t, sched, n_sellers, mode, issuetime)
+            # print('time %d sellerprice %d' % (time,orderprice))
+            order = Order(tname, ordertype, orderprice, 1, issuetime, chrono.time())
             new_pending.append(order)
     else:
+        # there are pending future orders: issue any whose timestamp is in the past
         new_pending = []
         for order in pending:
             if order.time < time:
+                # this order should have been issued by now
+                # issue it to the trader
                 tname = order.tid
-                response = traders[tname].add_order(time, order, False)
+                response = traders[tname].add_order(order, vrbs)
+                if vrbs:
+                    print('Customer order: %s %s' % (response, order))
                 if response == 'LOB_Cancel':
                     cancellations.append(tname)
                     if vrbs:
                         print('Cancellations: %s' % cancellations)
+                # and then don't add it to new_pending (i.e., delete it)
             else:
+                # this order stays on the pending list
                 new_pending.append(order)
-    if vrbs:
-        print('Customer orders: %s' % new_pending)
-        print('Cancellations: %s' % cancellations)
     return [new_pending, cancellations]
 
-def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level, trial):
-    """
-    One session in the market.
-    :param sess_id: the character-string ID for this session, used in naming output files.
-    :param starttime: the time the session starts.
-    :param endtime: the time the sessiom ends.
-    :param trader_spec: specification of the traders populating the market for this session.
-    :param order_schedule: specification of the "customer orders" assigned to traders, i.e. the supply/demand schedule.
-    :param dumpfile_flags: a dictionary of Boolean flags specifying which output files to be written for this session.
-    :param sess_vrbs: verbosity: if True, output a running commentary on what is going on; if False, stay silent.
-    :return: <nothing>.
-    """
+## NEW MODIFICATION
 
+def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level):
     # Determine output directory based on trial type
     if sess_id.startswith('baseline'):
         output_dir = os.path.join('base_output')
     else:
-        mix = 'mix_1' if len(trader_spec['proptraders']) == 2 else 'mix_2'
-        output_dir = os.path.join('exp_output', mix, f'noise_{noise_level}')
+        mix = f'mix_{hash(str(trader_spec))%1000:03d}'
+        output_dir = os.path.join('exp_output', mix, f'noise_{noise_level:.2f}')
     
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-
-    def dump_strats_frame(frametime, stratfile, trdrs):
-        """
-        Write one frame of strategy snapshot
-        :param frametime: the time that the frame snapshot is printed.
-        :param stratfile:  the file to write to.
-        :param trdrs: the population of traders.
-        :return: <nothing>
-        """
-
-        line_str = 't=,%.0f, ' % frametime
-
-        best_buyer_id = None
-        best_buyer_prof = 0
-        best_buyer_strat = None
-        best_seller_id = None
-        best_seller_prof = 0
-        best_seller_strat = None
-
-        # loop through traders to find the best
-        for trdr in traders:
-            trader = trdrs[trdr]
-
-            # print('PRSH/PRDE/ZIPSH strategy recording, t=%s' % trader)
-            if trader.ttype == 'PRSH' or trader.ttype == 'PRDE' or trader.ttype == 'ZIPSH':
-                line_str += 'id=,%s, %s,' % (trader.tid, trader.ttype)
-
-                if trader.ttype == 'ZIPSH':
-                    # we know that ZIPSH sorts the set of strats into best-first
-                    act_strat = trader.strats[0]['stratvec']
-                    act_prof = trader.strats[0]['pps']
-                else:
-                    act_strat = trader.strats[trader.active_strat]['stratval']
-                    act_prof = trader.strats[trader.active_strat]['pps']
-
-                line_str += 'actvstrat=,%s ' % trader.strat_csv_str(act_strat)
-                line_str += 'actvprof=,%f, ' % act_prof
-
-                if trader.tid[:1] == 'B':
-                    # this trader is a buyer
-                    if best_buyer_id is None or act_prof > best_buyer_prof:
-                        best_buyer_id = trader.tid
-                        best_buyer_strat = act_strat
-                        best_buyer_prof = act_prof
-                elif trader.tid[:1] == 'S':
-                    # this trader is a seller
-                    if best_seller_id is None or act_prof > best_seller_prof:
-                        best_seller_id = trader.tid
-                        best_seller_strat = act_strat
-                        best_seller_prof = act_prof
-                else:
-                    # wtf?
-                    sys.exit('unknown trader id type in market_session')
-
-        if best_buyer_id is not None:
-            line_str += 'best_B_id=,%s, best_B_prof=,%f, best_B_strat=, ' % (best_buyer_id, best_buyer_prof)
-            line_str += traders[best_buyer_id].strat_csv_str(best_buyer_strat)
-
-        if best_seller_id is not None:
-            line_str += 'best_S_id=,%s, best_S_prof=,%f, best_S_strat=, ' % (best_seller_id, best_seller_prof)
-            line_str += traders[best_seller_id].strat_csv_str(best_seller_strat)
-
-        line_str += '\n'
-
-        if verbose:
-            print('line_str: %s' % line_str)
-        stratfile.write(line_str)
-        stratfile.flush()
-        os.fsync(stratfile)
-
-    def blotter_dump(session_id, trdrs):
-        """
-        Write the blotter for each trader.
-        :param session_id: this market session's ID string (used for the filename).
-        :param trdrs: the population of traders.
-        :return: <nothing>
-        """
-        bdump = open(os.path.join(output_dir, session_id + '_blotters.csv'), 'w')
-        for trdr in trdrs:
-            bdump.write('%s, %d\n' % (trdrs[trdr].tid, len(trdrs[trdr].blotter)))
-            for b in trdrs[trdr].blotter:
-                bdump.write('%s, %s, %.3f, %d, %s, %s, %d\n'
-                            % (traders[trdr].tid, b['type'], b['time'], b['price'], b['party1'], b['party2'], b['qty']))
-        bdump.close()
+    os.makedirs(output_dir, exist_ok=True)
+    stats_buffer = []
 
     orders_verbose = False
     lob_verbose = False
@@ -3232,64 +3314,38 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
         avg_bals = None
         
     if dumpfile_flags['dump_tape']:
-        # NB writing transactions only -- not writing cancellations
         tape_dump = open(os.path.join(output_dir, sess_id + '_tape.csv'), 'w')
     else:
-        tape_dump = None
+        tape_dump = None  
         
-    # initialise the exchange
     exchange = Exchange()
-
-    # create a bunch of traders
     traders = {}
     trader_stats = populate_market(trader_spec, traders, True, populate_verbose)
-
-    # Reset Q-table for RLAgent at the start of a new condition
-    if (trial % trials_per_condition == 1) and ('RLAgent' in [a[0] for a in trader_spec['proptraders']]):
-        for t in traders:
-            if traders[t].ttype == 'RLAgent':
-                traders[t].reset_q_table()
-
-    # timestep set so that can process all traders in one second
-    # NB minimum interarrival time of customer orders may be much less than this!!
     timestep = 1.0 / float(trader_stats['n_buyers'] + trader_stats['n_sellers'] + trader_stats['n_proptraders'])
-
     session_duration = float(endtime - starttime)
-
     time = starttime
-
     pending_cust_orders = []
 
     if sess_vrbs:
         print('\n%s;  ' % sess_id)
 
-    # frames_done is record of what frames we have printed data for thus far
     frames_done = set()
 
     while time < endtime:
-
-        # how much time left, as a percentage?
         time_left = (endtime - time) / session_duration
 
         if sess_vrbs:
             print('\n\n%s; t=%08.2f (%4.1f/100) ' % (sess_id, time, time_left*100))
 
-        [pending_cust_orders, kills] = customer_orders(time, traders, trader_stats, order_schedule, pending_cust_orders, False, noise_level)
+        [pending_cust_orders, kills] = customer_orders(time, traders, trader_stats,
+                                                       order_schedule, pending_cust_orders, orders_verbose, noise_level)
 
-        # if any newly-issued customer orders mean quotes on the LOB need to be cancelled, kill them
         if len(kills) > 0:
-            # if verbose : print('Kills: %s' % (kills))
             for kill in kills:
-                # if verbose : print('lastquote=%s' % traders[kill].lastquote)
                 if traders[kill].lastquote is not None:
-                    # if verbose : print('Killing order %s' % (str(traders[kill].lastquote)))
-                    # NB if exchange.del_order() third argument = None then cancellations not written to tape file.
-                    # exchange.del_order(time, traders[kill].lastquote, tape_dump, sess_vrbs)
                     exchange.del_order(time, traders[kill].lastquote, None, sess_vrbs)
 
-        # get a limit-order quote (or None) from a randomly chosen trader
         tid = list(traders.keys())[random.randint(0, len(traders) - 1)]
-
         order = traders[tid].getorder(time, time_left, exchange.publish_lob(time, lobframes, lob_verbose))
         if sess_vrbs:
             print('trader=%s order=%s' % (tid, order))
@@ -3299,51 +3355,48 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
                 sys.exit('Bad ask')
             if order.otype == 'Bid' and order.price > traders[tid].orders[0].price:
                 sys.exit('Bad bid')
-            # send order to exchange
             traders[tid].n_quotes = 1
             trade = exchange.process_order(time, order, tape_dump, process_verbose)
             if trade is not None:
-                # trade occurred,
-                # so the counterparties update order lists and blotters
                 traders[trade['party1']].bookkeep(time, trade, order, bookkeep_verbose)
                 traders[trade['party2']].bookkeep(time, trade, order, bookkeep_verbose)
                 if dumpfile_flags['dump_avgbals']:
-                    trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose))
+                    stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)                
 
-            # traders respond to whatever happened
-            # Only write LOB frame every 10 seconds
-            if int(time) % 10 == 0:
-                lob = exchange.publish_lob(time, lobframes, lob_verbose)
-            else:
-                lob = exchange.publish_lob(time, None, lob_verbose)  # Compute LOB for traders but don’t write
-            
+            lob = exchange.publish_lob(time, lobframes, lob_verbose)
             any_record_frame = False
             for t in traders:
-                # NB respond just updates trader's internal variables
-                # doesn't alter the LOB, so processing each trader in
-                # sequence (rather than random/shuffle) isn't a problem
                 record_frame = traders[t].respond(time, lob, trade, respond_verbose)
                 if record_frame:
                     any_record_frame = True
 
-            # log all the PRSH/PRDE/ZIPSH strategy info for this timestep?
             if any_record_frame and dumpfile_flags['dump_strats']:
-                # print one more frame to strategy dumpfile
                 dump_strats_frame(time, strat_dump, traders)
-                # record that we've written this frame
                 frames_done.add(int(time))
 
         time = time + timestep
+   
+    if dumpfile_flags['dump_lobs'] and not frames_done:
+        log_path = os.path.join(output_dir, f'{sess_id}_lob_log.txt')
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, 'w') as log:
+            log.write('No LOB frames written in this trial\n')   
 
-    # session has ended
-
-    # write trade_stats for this session (NB could use this to write end-of-session summary only)
     if dumpfile_flags['dump_avgbals']:
-        trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose))
+        stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)
+        if stats_buffer:
+            avg_bals.writelines(stats_buffer)
+            avg_bals.flush()
         avg_bals.close()
 
+    # Check for no trades and ensure log is written correctly
+    if not exchange.tape:
+        log_path = os.path.join(output_dir, f'{sess_id}_log.txt')
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, 'w') as log:
+            log.write('No trades occurred in this trial\n')
+
     if dumpfile_flags['dump_blotters']:
-        # record the blotter for each trader
         blotter_dump(sess_id, traders)
 
     if dumpfile_flags['dump_strats']:
@@ -3352,145 +3405,141 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     if dumpfile_flags['dump_lobs']:
         lobframes.close()
 
-def schedule_offsetfn_read_file(filename, col_t, col_p, scale_factor=75):
-    offset_events = []
-    min_price = float('inf')
-    max_price = float('-inf')
-    max_time = 0.0
-    from datetime import datetime
-    import csv
-    import os
-    file_path = os.path.join('data', filename)
-    with open(file_path, 'r') as csvfile:
-        csvreader = csv.reader(csvfile)
-        next(csvreader)  # Skip header
-        for row in csvreader:
-            # Parse ISO 8601 timestamp to seconds since start
-            timestamp = datetime.fromisoformat(row[col_t].replace('Z', '+00:00'))
-            if not offset_events:
-                start_time = timestamp
-            time_secs = (timestamp - start_time).total_seconds()
-            # Remove commas from price string before converting to float
-            price_str = row[col_p].replace(',', '')
-            price = float(price_str)
-            offset_events.append([time_secs, price])
-            min_price = min(min_price, price)
-            max_price = max(max_price, price)
-            max_time = max(max_time, time_secs)
-    for event in offset_events:
-        event[0] = event[0] / max_time if max_time > 0 else 0
-        event[1] = (event[1] - min_price) * scale_factor / (max_price - min_price) if max_price > min_price else 0
-    return offset_events
-
-def schedule_offsetfn_from_eventlist(time, params):
-    event_list = params[1]
-    end_time = params[0]
-    percent_elapsed = time / end_time
-    offset = 0
-    for event in event_list:
-        if percent_elapsed >= event[0]:
-            offset = event[1]
-        else:
-            break
-    return offset
-
 #############################
 # # Below here is where we set up and run a whole series of experiments
 
 if __name__ == "__main__":
-    from sys import argv
-    import csv
-    import os
-    if len(argv) > 1:
-        price_offset_filename = argv[1]
-    else:
-        price_offset_filename = 'offset_BTC_USD_20250211.csv'
+
+    price_offset_filename = 'data//offset_BTC_USD_20250211.csv'
+
+    if len(sys.argv) > 1:
+        price_offset_filename = sys.argv[1]
+
     n_days = 1
-    hours_in_a_day = 1  # 1 hour
+    hours_in_a_day = 24
     start_time = 0.0
     end_time = 60.0 * 60.0 * hours_in_a_day * n_days
     duration = end_time - start_time
 
-    offsetfn_events = schedule_offsetfn_read_file(price_offset_filename, 0, 1)
-    range1 = (75, 110, (schedule_offsetfn_from_eventlist, [end_time, offsetfn_events]))
-    range2 = (125, 90, (schedule_offsetfn_from_eventlist, [end_time, offsetfn_events]))
+    def schedule_offsetfn_read_file(filename, col_t, col_p, scale_factor=75):
+        vrbs = False
+        rwd_csv = csv.reader(open(filename, 'r'))
+        minprice = None
+        maxprice = None
+        firsttimeobj = None
+        timesincestart = 0
+        priceevents = []
+        first_row_is_header = True
+        this_is_first_row = True
+        this_is_first_data_row = True
+        first_date = None
+
+        for line in rwd_csv:
+            if this_is_first_row and first_row_is_header:
+                this_is_first_row = False
+                this_is_first_data_row = True
+                continue
+            row_date = line[col_t][:10]
+            if this_is_first_data_row:
+                first_date = row_date
+                this_is_first_data_row = False
+            if row_date != first_date:
+                continue
+            time = line[col_t][11:19]
+            if firsttimeobj is None:
+                firsttimeobj = datetime.strptime(time, '%H:%M:%S')
+            timeobj = datetime.strptime(time, '%H:%M:%S')
+            price_str = line[col_p]
+            price_str_no_commas = price_str.replace(',', '')
+            price = float(price_str_no_commas)
+            if minprice is None or price < minprice:
+                minprice = price
+            if maxprice is None or price > maxprice:
+                maxprice = price
+            timesincestart = (timeobj - firsttimeobj).total_seconds()
+            priceevents.append([timesincestart, price])
+
+        pricerange = maxprice - minprice
+        endtime = float(timesincestart)
+        offsetfn_eventlist = []
+        for event in priceevents:
+            normld_price = (event[1] - minprice) / pricerange
+            normld_price = min(normld_price, 1.0)
+            normld_price = max(0.0, normld_price)
+            price = int(round(normld_price * scale_factor))
+            normld_event = [event[0] / endtime, price]
+            offsetfn_eventlist.append(normld_event)
+        return offsetfn_eventlist
+
+    def schedule_offsetfn_from_eventlist(time, params):
+        final_time = float(params[0])
+        offset_events = params[1]
+        percent_elapsed = time / final_time
+        offset = None
+        for event in offset_events:
+            offset = event[1]
+            if percent_elapsed < event[0]:
+                break
+        return offset
+
+    def schedule_offsetfn_increasing_sinusoid(t, params):
+        if params is None:
+            pass
+        scale = -7500
+        multiplier = 7500000
+        offset = ((scale * t) / multiplier) * (1 + math.sin((t * t) / (multiplier * math.pi)))
+        return int(round(offset, 0))
+
+    offsetfn_events = None
+    if price_offset_filename is not None:
+        offsetfn_eventlist = schedule_offsetfn_read_file(price_offset_filename, 0, 1)
+        offsetfn_events = offsetfn_eventlist
+
+    range1 = (75, 110, (schedule_offsetfn_from_eventlist, [[end_time, offsetfn_events]]))
     supply_schedule = [{'from': start_time, 'to': end_time, 'ranges': [range1], 'stepmode': 'random'}]
+    range2 = (125, 90, (schedule_offsetfn_from_eventlist, [[end_time, offsetfn_events]]))
     demand_schedule = [{'from': start_time, 'to': end_time, 'ranges': [range2], 'stepmode': 'random'}]
     order_interval = 10
     order_sched = {'sup': supply_schedule, 'dem': demand_schedule, 'interval': order_interval, 'timemode': 'drip-poisson'}
+
     verbose = False
-    n_trials = 90
-    n_trials_recorded = 5
-    dump_flags = {'dump_blotters': True, 'dump_lobs': True, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
+    dump_flags = {'dump_blotters': True, 'dump_lobs': False, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
+
+    # Baseline trials
+    baseline_trials = 15
+    baseline_noise = 0.0
+    baseline_traders_spec = {
+        'buyers': [('ZIC', 10)],
+        'sellers': [('ZIC', 10)],
+        'proptraders': [('ZIC', 2)]
+    }
+    for t in range(baseline_trials):
+        trial_id = f'baseline_zic_{t:04d}'
+        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, baseline_noise)
+
+    # Modified trials
+    noise_levels = [0.0, 0.05, 0.1]
     
-    noise_levels = [0.0, 0.1, 0.2]
-    agent_mixes = [
-        [('TrendFollower', 1), ('MeanReverter', 1)],
-        [('TrendFollower', 1), ('MeanReverter', 1), ('RLAgent', 1)]
+    trader_mixes = [
+        {'buyers': [('ZIC', 10)],
+         'sellers': [('ZIC', 10)],
+         'proptraders': [('TrendFollower', 1), ('MeanReverter', 1)]},
+        {'buyers': [('ZIC', 10)],
+         'sellers': [('ZIC', 10)],
+         'proptraders': [('TrendFollower', 1), ('MeanReverter', 1), ('RLAgent', 1)]}
     ]
-    trials_per_condition = 1
-    buyers_spec = [('ZIC', 10)]
-    sellers_spec = [('ZIC', 10)]
-    
-    trial = 1
+    n_trials_per_config = 15
+
     for noise in noise_levels:
-            for agent_mix in agent_mixes:
-                traders_spec = {'buyers': buyers_spec, 'sellers': sellers_spec, 'proptraders': agent_mix}
-                # Initialize traders for this condition
-                traders = {}
-                trader_stats = populate_market(traders_spec, traders, 10000.0, start_time)
-                # Reset RLAgent Q-table at start of condition
-                if 'RLAgent' in [a[0] for a in agent_mix]:
-                    for t in traders:
-                        if traders[t].ttype == 'RLAgent':
-                            traders[t].reset_q_table()
-                for t in range(trials_per_condition):
-                    trial_id = f'exp_doo1_i10_{trial:04d}' #'exp_d%03d_i%02d_%04d' % (n_days, order_interval, trial)
-                    market_session(trial_id, start_time, end_time, traders_spec, order_sched, dump_flags, verbose, noise, trial)
-                    trial += 1
-    # The code in comments below here is for illustration, in case you want to do an exhaustive sweep of all possible
-    # combinations of some set of trading strategies: if its of no interest, it can be deleted.
-    #
-    # run a sequence of trials that exhaustively varies the ratio of four trader types
-    # NB this has weakness of symmetric proportions on buyers/sellers -- combinatorics of varying that are quite nasty
-    #
-    # n_trader_types = 4
-    # equal_ratio_n = 4
-    # n_trials_per_ratio = 50
-    #
-    # n_traders = n_trader_types * equal_ratio_n
-    #
-    # fname = 'balances_%03d.csv' % equal_ratio_n
-    #
-    # tdump = open(fname, 'w')
-    #
-    # min_n = 1
-    #
-    # trialnumber = 1
-    # trdr_1_n = min_n
-    # while trdr_1_n <= n_traders:
-    #     trdr_2_n = min_n
-    #     while trdr_2_n <= n_traders - trdr_1_n:
-    #         trdr_3_n = min_n
-    #         while trdr_3_n <= n_traders - (trdr_1_n + trdr_2_n):
-    #             trdr_4_n = n_traders - (trdr_1_n + trdr_2_n + trdr_3_n)
-    #             if trdr_4_n >= min_n:
-    #                 buyers_spec = [('GVWY', trdr_1_n), ('SHVR', trdr_2_n),
-    #                                ('ZIC', trdr_3_n), ('ZIP', trdr_4_n)]
-    #                 sellers_spec = buyers_spec
-    #                 traders_spec = {'sellers': sellers_spec, 'buyers': buyers_spec}
-    #                 # print buyers_spec
-    #                 trial = 1
-    #                 while trial <= n_trials_per_ratio:
-    #                     trial_id = 'trial%07d' % trialnumber
-    #                     market_session(trial_id, start_time, end_time, traders_spec,
-    #                                    order_sched, tdump, False, True)
-    #                     tdump.flush()
-    #                     trial = trial + 1
-    #                     trialnumber = trialnumber + 1
-    #             trdr_3_n += 1
-    #         trdr_2_n += 1
-    #     trdr_1_n += 1
-    # tdump.close()
-    #
-    # print(trialnumber)
+        for mix in trader_mixes:
+            # Initialize traders for this condition
+            traders = {}
+            trader_stats = populate_market(mix, traders, True, False)
+            # Reset RLAgent Q-table if present
+            if 'RLAgent' in [t[0] for t in mix.get('proptraders', [])]:
+                for t in traders:
+                    if traders[t].ttype == 'RLAgent':
+                        traders[t].reset_q_table()
+            for t in range(n_trials_per_config):
+                trial_id = f'bse_d001_i10_{(t + (int(noise * 100) // 5 * 15) + (1 if len(mix["proptraders"]) == 3 else 0) * 45):04d}'
+                market_session(trial_id, start_time, end_time, mix, order_sched, dump_flags, verbose, noise)
