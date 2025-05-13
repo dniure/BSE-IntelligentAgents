@@ -2828,7 +2828,7 @@ def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
     # Buffer output
     if buffer is None:
         buffer = []
-    line = f'{expid}, {time:06d}, '
+    line = f'{expid}, {time:06.2f}, '
     if lob['bids']['best'] is not None:
         line += f'{lob["bids"]["best"]}, '
     else:
@@ -3054,7 +3054,7 @@ def dump_strats_frame(time, strat_dump, traders):
 
 def blotter_dump(sess_id, traders):
     for t in traders:
-        blotter_file = open(f'{sess_id}_{t}_blotter.csv', 'w')
+        blotter_file = open(os.path.join(output_dir, f'{sess_id}_{t}_blotter.csv'), 'w')
         blotter_file.write('Time,Price,Qty,Party1,Party2\n')
         for trade in traders[t].blotter:
             if trade['type'] == 'Trade':
