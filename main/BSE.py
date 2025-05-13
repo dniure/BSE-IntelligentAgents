@@ -423,67 +423,36 @@ class Exchange(Orderbook):
         if tmode == 'wipe':
             self.tape = []
 
-    def publish_lob(self, time, lob_file, vrbs):
-        """
-        Returns the public LOB data published by the exchange, 
-        i.e. the version of the LOB that's accessible to the traders.
-        :param time: the current time.
-        :param lob_file: 
-        :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
-        :return: the public LOB data.
-        """
-        public_data = dict()
-        public_data['time'] = time
-        public_data['bids'] = {'best': self.bids.best_price,
-                               'worst': self.bids.worstprice,
-                               'n': self.bids.n_orders,
-                               'lob': self.bids.lob_anon}
-        public_data['asks'] = {'best': self.asks.best_price,
-                               'worst': self.asks.worstprice,
-                               'sess_hi': self.asks.session_extreme,
-                               'n': self.asks.n_orders,
-                               'lob': self.asks.lob_anon}
-        public_data['QID'] = self.quote_id
-        public_data['tape'] = self.tape
+def publish_lob(self, time, lob_file, vrbs):
+    public_data = dict()
+    public_data['time'] = time
+    public_data['bids'] = {'best': self.bids.best_price, 'worst': self.bids.worstprice,
+                           'n': self.bids.n_orders, 'lob': self.bids.lob_anon}
+    public_data['asks'] = {'best': self.asks.best_price, 'worst': self.asks.worstprice,
+                           'sess_hi': self.asks.session_extreme, 'n': self.asks.n_orders,
+                           'lob': self.asks.lob_anon}
+    public_data['QID'] = self.quote_id
+    public_data['tape'] = self.tape
 
-        if lob_file is not None:
-            # build a linear character-string summary of only those prices on LOB with nonzero quantities
-            lobstring = 'Bid:,'
-            n_bids = len(self.bids.lob_anon)
-            if n_bids > 0:
-                lobstring += '%d,' % n_bids
-                for lobitem in self.bids.lob_anon:
-                    price_str = '%d,' % lobitem[0]
-                    qty_str = '%d,' % lobitem[1]
-                    lobstring = lobstring + price_str + qty_str
-            else:
-                lobstring += '0,'
-            lobstring += 'Ask:,'
-            n_asks = len(self.asks.lob_anon)
-            if n_asks > 0:
-                lobstring += '%d,' % n_asks
-                for lobitem in self.asks.lob_anon:
-                    price_str = '%d,' % lobitem[0]
-                    qty_str = '%d,' % lobitem[1]
-                    lobstring = lobstring + price_str + qty_str
-            else:
-                lobstring += '0,'
-            # is this different to the last lob_string?
-            if lobstring != self.lob_string:
-                # write it
-                lob_file.write('%.3f, %s\n' % (time, lobstring))
-                # remember it
-                self.lob_string = lobstring
+    if lob_file is not None:
+        # Convert lob_anon to DataFrame
+        bids_df = pd.DataFrame(self.bids.lob_anon, columns=['bid_price', 'bid_qty']).astype({'bid_price': 'int32', 'bid_qty': 'int16'})
+        asks_df = pd.DataFrame(self.asks.lob_anon, columns=['ask_price', 'ask_qty']).astype({'ask_price': 'int32', 'ask_qty': 'int16'})
+        lob_df = pd.DataFrame({
+            'time': time,
+            'best_bid': pd.Series(self.bids.best_price, dtype='int32'),
+            'best_ask': pd.Series(self.asks.best_price, dtype='int32'),
+            'n_bids': pd.Series(self.bids.n_orders, dtype='int16'),
+            'n_asks': pd.Series(self.asks.n_orders, dtype='int16')
+        })
+        lob_df.to_csv(lob_file, mode='a', header=not lob_file.tell(), index=False)
 
-        if vrbs:
-            vstr = 'publish_lob: t=%f' % time
-            vstr += ' BID_lob=%s' % public_data['bids']['lob']
-            # vstr += 'best=%s; worst=%s; n=%s ' % (self.bids.best_price, self.bids.worstprice, self.bids.n_orders)
-            vstr += ' ASK_lob=%s' % public_data['asks']['lob']
-            # vstr += 'qid=%d' % self.quote_id
-            print(vstr)
+    if vrbs:
+        vstr = f'publish_lob: t={time:.1f} BID_lob={public_data["bids"]["lob"]} ASK_lob={public_data["asks"]["lob"]}'
+        print(vstr)
 
-        return public_data
+    return public_data    
+
 
 
 # #################--Traders below here--#############
@@ -2788,28 +2757,19 @@ def trade_stats(expid, traders, dumpfile, time, lob):
     n_traders = len(traders)
     for t in traders:
         ttype = traders[t].ttype
-        if ttype in trader_types.keys():
+        if ttype in trader_types:
             t_balance = trader_types[ttype]['balance_sum'] + traders[t].balance
             t_n = trader_types[ttype]['n'] + 1
             trader_types[ttype] = {'n': t_n, 'balance_sum': t_balance}
         else:
             trader_types[ttype] = {'n': 1, 'balance_sum': traders[t].balance}
-    dumpfile.write('%s, %06d, ' % (expid, time))
-    if lob['bids']['n'] > 0:
-        dumpfile.write('%d, ' % (lob['bids']['best']))
-    else:
-        dumpfile.write('None, ')
-    if lob['asks']['n'] > 0:
-        dumpfile.write('%d, ' % (lob['asks']['best']))
-    else:
-        dumpfile.write('None, ')
-    for ttype in sorted(list(trader_types.keys())):
+    dumpfile.write(f'{expid}, {time:06d}, ')
+    dumpfile.write(f'{lob["bids"]["best"] if lob["bids"]["n"] > 0 else "None"}, ')
+    dumpfile.write(f'{lob["asks"]["best"] if lob["asks"]["n"] > 0 else "None"}, ')
+    for ttype in sorted(trader_types.keys()):
         n = trader_types[ttype]['n']
         bal = trader_types[ttype]['balance_sum']
-        dumpfile.write('%s, %d, %d, %f, ' % (ttype, n, bal, bal / n))
-    # Add per-agent balances
-    for t in sorted(traders.keys()):
-        dumpfile.write('%s, %d, ' % (t, traders[t].balance))
+        dumpfile.write(f'{ttype}, {n}, {bal}, {bal/n:.2f}, ')
     dumpfile.write('\n')
 
 def populate_market(trdrs_spec, traders, shuffle, vrbs):

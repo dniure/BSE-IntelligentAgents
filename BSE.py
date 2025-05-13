@@ -251,7 +251,7 @@ class Orderbook(OrderbookHalf):
         self.lob_string = ''        # character-string linearization of public lob items with nonzero quantities
 
 ## NEW ADDITION
-def add_noise_to_price(price, noise_level=0.05):
+def add_noise_to_price(price, noise_level):
     """Add Gaussian noise to an order price, clipped to system min/max."""
     noise = random.gauss(0, noise_level * price)
     noisy_price = int(round(price + noise))
@@ -2778,8 +2778,25 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
 
     return {'n_buyers': n_buyers, 'n_sellers': n_sellers, 'n_proptraders': n_proptraders}
 
+def dump_strats_frame(time, strat_dump, traders):
+    strat_dump.write(f"{time},")
+    for t in traders:
+        if hasattr(traders[t], 'strat_str'):
+            strat_dump.write(traders[t].strat_str().replace('\n', ';') + ',')
+        else:
+            strat_dump.write('None,')
+    strat_dump.write('\n')
+    
+def blotter_dump(sess_id, traders):
+    for t in traders:
+        blotter_file = open(f'{sess_id}_{t}_blotter.csv', 'w')
+        blotter_file.write('Time,Price,Qty,Party1,Party2\n')
+        for trade in traders[t].blotter:
+            if trade['type'] == 'Trade':
+                blotter_file.write(f"{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
+        blotter_file.close()
 
-def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs):
+def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level=0.05):
     """
     Generate a list of new customer-orders to be issued to the traders in the immediate/near future,
     and a list of any existing customer-orders that need to be cancelled because they are overridden by new ones.
@@ -2861,7 +2878,8 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs):
             sys.exit('FAIL: Unknown mode in schedule')
         
         # Step 2.1: Add noise to the order price
-        order_price = add_noise_to_price(order_price)
+        if noise_level > 0:
+            order_price = add_noise_to_price(order_price, noise_level)
         
         return sysmin_check(sysmax_check(order_price))
 
@@ -2996,14 +3014,7 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs):
     return [new_pending, cancellations]
 
 ## NEW MODIFICATION
-def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs):
-    # [Existing market_session code remains unchanged except for trader_spec handling]
-    # Ensure trader_spec includes NOISE traders
-    buyers_spec = [('SHVR', 5), ('GVWY', 5), ('ZIC', 2), ('ZIP', 12), ('NOISE', 1)]
-    sellers_spec = buyers_spec
-    proptraders_spec = [('PT1', 1, {'bid_percent': 0.95, 'ask_delta': 7}), ('PT2', 1, {'n_past_trades': 25})]
-    traders_spec = {'sellers': sellers_spec, 'buyers': buyers_spec, 'proptraders': proptraders_spec}
-    
+def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level=0.05):
     orders_verbose = False
     lob_verbose = False
     process_verbose = False
@@ -3033,7 +3044,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
         
     exchange = Exchange()
     traders = {}
-    trader_stats = populate_market(traders_spec, traders, True, populate_verbose)
+    trader_stats = populate_market(trader_spec, traders, True, populate_verbose)
     timestep = 1.0 / float(trader_stats['n_buyers'] + trader_stats['n_sellers'] + trader_stats['n_proptraders'])
     session_duration = float(endtime - starttime)
     time = starttime
@@ -3051,7 +3062,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
             print('\n\n%s; t=%08.2f (%4.1f/100) ' % (sess_id, time, time_left*100))
 
         [pending_cust_orders, kills] = customer_orders(time, traders, trader_stats,
-                                                       order_schedule, pending_cust_orders, orders_verbose)
+                                                       order_schedule, pending_cust_orders, orders_verbose, noise_level)
 
         if len(kills) > 0:
             for kill in kills:
@@ -3109,124 +3120,69 @@ if __name__ == "__main__":
 
     price_offset_filename = 'offset_BTC_USD_20250211.csv'
 
-    # if called from the command line with one argument, the first argument is the price offset filename
     if len(sys.argv) > 1:
         price_offset_filename = sys.argv[1]
 
-    # set up common parameters for all market sessions
-    # 1000 days is often good, but 3*365=1095, so may as well go for three years.
     n_days = 1
-    hours_in_a_day = 24     # how many hours the exchange operates for in a working day (e.g. NYSE = 7.5)
+    hours_in_a_day = 24
     start_time = 0.0
     end_time = 60.0 * 60.0 * hours_in_a_day * n_days
     duration = end_time - start_time
 
-
     def schedule_offsetfn_read_file(filename, col_t, col_p, scale_factor=75):
-        """
-        Read in a CSV data-file for the supply/demand schedule time-varying price-offset value
-        :param filename: the CSV file to read
-        :param col_t: column in the CSV that has the time data
-        :param col_p: column in the CSV that has the price data
-        :param scale_factor: multiplier on prices
-        :return: on offset value event-list: one item for each change in offset value
-                -- each item is percentage time elapsed, followed by the new offset value at that time
-        """
-        
-        vrbs = True
-        
-        # does two passes through the file
-        # assumes data file is all for one date, sorted in time order, in correct format, etc. etc.
+        vrbs = False
         rwd_csv = csv.reader(open(filename, 'r'))
-        
-        # first pass: get time & price events, find out how long session is, get min & max price
         minprice = None
         maxprice = None
         firsttimeobj = None
         timesincestart = 0
         priceevents = []
-        
         first_row_is_header = True
         this_is_first_row = True
         this_is_first_data_row = True
         first_date = None
-        
+
         for line in rwd_csv:
-            
-            if vrbs:
-                print(line)
-            
             if this_is_first_row and first_row_is_header:
                 this_is_first_row = False
                 this_is_first_data_row = True
                 continue
-                
             row_date = line[col_t][:10]
-            
             if this_is_first_data_row:
                 first_date = row_date
                 this_is_first_data_row = False
-                
             if row_date != first_date:
                 continue
-                
             time = line[col_t][11:19]
             if firsttimeobj is None:
                 firsttimeobj = datetime.strptime(time, '%H:%M:%S')
-                
             timeobj = datetime.strptime(time, '%H:%M:%S')
-            
             price_str = line[col_p]
-            # delete any commas so 1,000,000 becomes 1000000
             price_str_no_commas = price_str.replace(',', '')
             price = float(price_str_no_commas)
-            
             if minprice is None or price < minprice:
                 minprice = price
             if maxprice is None or price > maxprice:
                 maxprice = price
             timesincestart = (timeobj - firsttimeobj).total_seconds()
             priceevents.append([timesincestart, price])
-            
-            if vrbs:
-                print(row_date, time, timesincestart, price)
-            
-        # second pass: normalise times to fractions of entire time-series duration
-        #              & normalise price range
+
         pricerange = maxprice - minprice
         endtime = float(timesincestart)
         offsetfn_eventlist = []
         for event in priceevents:
-            # normalise price
             normld_price = (event[1] - minprice) / pricerange
-            # clip
             normld_price = min(normld_price, 1.0)
             normld_price = max(0.0, normld_price)
-            # scale & convert to integer cents
             price = int(round(normld_price * scale_factor))
             normld_event = [event[0] / endtime, price]
-            if vrbs:
-                print(normld_event)
             offsetfn_eventlist.append(normld_event)
-        
         return offsetfn_eventlist
 
-
     def schedule_offsetfn_from_eventlist(time, params):
-        """
-        Returns a price offset-value for the current time, by reading from an offset event-list.
-        :param time: the current time
-        :param params: a list of parameter values...
-            params[1] is the final time (the end-time) of the current session.
-            params[2] is the offset event-list: one item for each change in offset value
-                        -- each item is percentage time elapsed, followed by the new offset value at that time
-        :return: integer price offset value
-        """
-
         final_time = float(params[0])
         offset_events = params[1]
-        # this is quite inefficient: on every call it walks the event-list
-        percent_elapsed = time/final_time
+        percent_elapsed = time / final_time
         offset = None
         for event in offset_events:
             offset = event[1]
@@ -3234,142 +3190,55 @@ if __name__ == "__main__":
                 break
         return offset
 
-
     def schedule_offsetfn_increasing_sinusoid(t, params):
-        """
-        Returns sinusoidal time-dependent price-offset, steadily increasing in frequency & amplitude
-        :param t: time
-        :param params: set of parameters for the offsetfn: this is empty-set for this offsetfn but nonempty in others
-        :return: the time-dependent price offset at time t
-        """
-        if params is None:  # this test of params is here only to prevent PyCharm from warning about unused parameters
+        if params is None:
             pass
         scale = -7500
-        multiplier = 7500000    # determines rate of increase of frequency and amplitude
-        offset = ((scale * t) / multiplier) * (1 + math.sin((t*t)/(multiplier * math.pi)))
+        multiplier = 7500000
+        offset = ((scale * t) / multiplier) * (1 + math.sin((t * t) / (multiplier * math.pi)))
         return int(round(offset, 0))
-
-    # Here is an example of how to use the offset function
-    #
-    # range1 = (10, 190, (schedule_offsetfn, args)) # args is the list of arguments to the function
-    # range2 = (200, 300, (schedule_offsetfn, args))
-
-    # Here is an example of how to switch from range1 to range2 and then back to range1,
-    # introducing two "market shocks"
-    # -- here the timings of the shocks are at 1/3 and 2/3 into the duration of the session.
-    #
-    # supply_schedule = [ {'from':start_time, 'to':duration/3, 'ranges':[range1], 'stepmode':'fixed'},
-    #                     {'from':duration/3, 'to':2*duration/3, 'ranges':[range2], 'stepmode':'fixed'},
-    #                     {'from':2*duration/3, 'to':end_time, 'ranges':[range1], 'stepmode':'fixed'}
-    #                   ]
 
     offsetfn_events = None
     if price_offset_filename is not None:
-        offsetfn_events = schedule_offsetfn_read_file(price_offset_filename, 0, 1)
+        offsetfn_eventlist = schedule_offsetfn_read_file(price_offset_filename, 0, 1)
+        offsetfn_events = offsetfn_eventlist
 
-    # supply schedule (defines the supply curve)
     range1 = (75, 110, (schedule_offsetfn_from_eventlist, [[end_time, offsetfn_events]]))
     supply_schedule = [{'from': start_time, 'to': end_time, 'ranges': [range1], 'stepmode': 'random'}]
-
-    # demand schedule (defines the demand curve)
     range2 = (125, 90, (schedule_offsetfn_from_eventlist, [[end_time, offsetfn_events]]))
     demand_schedule = [{'from': start_time, 'to': end_time, 'ranges': [range2], 'stepmode': 'random'}]
-
-    # new customer orders arrive at each trader approx once every order_interval seconds
     order_interval = 10
+    order_sched = {'sup': supply_schedule, 'dem': demand_schedule, 'interval': order_interval, 'timemode': 'drip-poisson'}
 
-    # order schedule wraps up the supply/demand schedules and details of how customer orders/assignments are issued
-    order_sched = {'sup': supply_schedule, 'dem': demand_schedule,
-                   'interval': order_interval, 'timemode': 'drip-poisson'}
-
-    # now run a sequence of trials, one session per trial
-
-    # if verbose = True, print a running commentary describing what's going on.
     verbose = False
+    dump_flags = {'dump_blotters': True, 'dump_lobs': False, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
 
-    # n_trials is how many trials (i.e. market sessions) to run in total
-    n_trials = 1
+    # Baseline trials
+    baseline_trials = 15
+    baseline_noise = 0.0
+    baseline_traders_spec = {
+        'buyers': [('ZIC', 10)],
+        'sellers': [('ZIC', 10)],
+        'proptraders': [('ZIC', 2)]
+    }
+    for t in range(baseline_trials):
+        trial_id = f'baseline_zic_{t:04d}'
+        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, baseline_noise)
 
-    # n_recorded is how many trials (i.e. market sessions) to write full data-files for
-    n_trials_recorded = 5
+    # Modified trials
+    noise_levels = [0.0, 0.05, 0.1]
+    trader_mixes = [
+        {'buyers': [('SHVR', 5), ('GVWY', 5), ('ZIC', 2), ('ZIP', 12), ('NOISE', 1)],
+         'sellers': [('SHVR', 5), ('GVWY', 5), ('ZIC', 2), ('ZIP', 12), ('NOISE', 1)],
+         'proptraders': [('PT1', 1, {'bid_percent': 0.95, 'ask_delta': 7}), ('PT2', 1, {'n_past_trades': 25})]},
+        {'buyers': [('ZIC', 10), ('NOISE', 1)],
+         'sellers': [('ZIC', 10), ('NOISE', 1)],
+         'proptraders': [('ZIC', 2)]}
+    ]
+    n_trials_per_config = 15
 
-    trial = 1
-
-    while trial < (n_trials+1):
-
-        # create unique i.d. string for this trial
-        trial_id = 'bse_d%03d_i%02d_%04d' % (n_days, order_interval, trial)
-
-        # buyer_spec specifies the strategies played by buyers, and for each strategy how many such buyers to create
-        buyers_spec = [('SHVR', 5), ('GVWY', 5), ('ZIC', 2), ('ZIP', 13)]
-        #     ('PRZI', 5, {'s_min': -1.0, 's_max': +1.0})]
-
-        # seller_spec specifies the strategies played by sellers, and for each strategy how many such sellers to create
-        sellers_spec = buyers_spec
-
-        # proptraders_spec specifies strategies played by proprietary-traders, and how many of each
-        proptraders_spec = [('PT1', 1, {'bid_percent': 0.95, 'ask_delta': 7}), ('PT2', 1, {'n_past_trades': 25})]
-
-        # trader_spec wraps up the specifications for the buyers, sellers, and proptraders
-        traders_spec = {'sellers': sellers_spec, 'buyers': buyers_spec, 'proptraders': proptraders_spec}
-
-        if trial > n_trials_recorded:
-            # switch off recording of detailed data-files
-            dump_flags = {'dump_blotters': False, 'dump_lobs': False, 'dump_strats': False,
-                          'dump_avgbals': False, 'dump_tape': False}
-        else:
-            # we're still recording all the required data-files
-            dump_flags = {'dump_blotters': True, 'dump_lobs': False, 'dump_strats': True,
-                          'dump_avgbals': True, 'dump_tape': True}
-
-        # simulate the market session
-        market_session(trial_id, start_time, end_time, traders_spec, order_sched, dump_flags, verbose)
-
-        trial = trial + 1
-
-    # The code in comments below here is for illustration, in case you want to do an exhaustive sweep of all possible
-    # combinations of some set of trading strategies: if its of no interest, it can be deleted.
-    #
-    # run a sequence of trials that exhaustively varies the ratio of four trader types
-    # NB this has weakness of symmetric proportions on buyers/sellers -- combinatorics of varying that are quite nasty
-    #
-    # n_trader_types = 4
-    # equal_ratio_n = 4
-    # n_trials_per_ratio = 50
-    #
-    # n_traders = n_trader_types * equal_ratio_n
-    #
-    # fname = 'balances_%03d.csv' % equal_ratio_n
-    #
-    # tdump = open(fname, 'w')
-    #
-    # min_n = 1
-    #
-    # trialnumber = 1
-    # trdr_1_n = min_n
-    # while trdr_1_n <= n_traders:
-    #     trdr_2_n = min_n
-    #     while trdr_2_n <= n_traders - trdr_1_n:
-    #         trdr_3_n = min_n
-    #         while trdr_3_n <= n_traders - (trdr_1_n + trdr_2_n):
-    #             trdr_4_n = n_traders - (trdr_1_n + trdr_2_n + trdr_3_n)
-    #             if trdr_4_n >= min_n:
-    #                 buyers_spec = [('GVWY', trdr_1_n), ('SHVR', trdr_2_n),
-    #                                ('ZIC', trdr_3_n), ('ZIP', trdr_4_n)]
-    #                 sellers_spec = buyers_spec
-    #                 traders_spec = {'sellers': sellers_spec, 'buyers': buyers_spec}
-    #                 # print buyers_spec
-    #                 trial = 1
-    #                 while trial <= n_trials_per_ratio:
-    #                     trial_id = 'trial%07d' % trialnumber
-    #                     market_session(trial_id, start_time, end_time, traders_spec,
-    #                                    order_sched, tdump, False, True)
-    #                     tdump.flush()
-    #                     trial = trial + 1
-    #                     trialnumber = trialnumber + 1
-    #             trdr_3_n += 1
-    #         trdr_2_n += 1
-    #     trdr_1_n += 1
-    # tdump.close()
-    #
-    # print(trialnumber)
+    for noise in noise_levels:
+        for mix in trader_mixes:
+            for t in range(n_trials_per_config):
+                trial_id = f'trial_n{noise:.2f}_mix{hash(str(mix))%1000:03d}_{t:04d}'
+                market_session(trial_id, start_time, end_time, mix, order_sched, dump_flags, verbose, noise)
