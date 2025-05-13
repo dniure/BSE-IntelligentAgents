@@ -58,6 +58,7 @@ import time as chrono
 import csv
 from datetime import datetime
 import numpy as np
+import time as chrono
 
 # a bunch of system constants (globals)
 bse_sys_minprice = 1                    # minimum price in the system, in cents/pennies
@@ -448,7 +449,7 @@ class Exchange(Orderbook):
         public_data['QID'] = self.quote_id
         public_data['tape'] = self.tape
 
-        if lob_file is not None and int(time) % 10 == 0:  # Write LOB frame every 10 seconds
+        if lob_file is not None and int(time) % 1 == 0:  # Write LOB frame every 1 second
             # build a linear character-string summary of only those prices on LOB with nonzero quantities
             lobstring = 'Bid:,'
             n_bids = len(self.bids.lob_anon)
@@ -2531,7 +2532,12 @@ class TraderTrendFollower(Trader):
         if lob['bids']['n'] > 0 and lob['asks']['n'] > 0:
             mid_price = (lob['bids']['best'] + lob['asks']['best']) / 2.0
         self.price_history.append(mid_price)
-        self.price_history = self.price_history[-3:]  # Keep last 3 timesteps
+        self.price_history = self.price_history[-2:]  # Keep last 2 timesteps
+
+        if len(self.price_history) >= 2 and all(p is not None for p in self.price_history):
+            increasing = self.price_history[-1] > self.price_history[-2]
+            decreasing = self.price_history[-1] < self.price_history[-2]
+
         vstr += "mid_price=%s, history=%s" % (mid_price, self.price_history)
         
         self.orders = []
@@ -2619,7 +2625,7 @@ class TraderMeanReverter(Trader):
             moving_avg = sum(self.price_history) / len(self.price_history)
             vstr += ", moving_avg=%.2f" % moving_avg
             
-            if self.job == 'Buy' and mid_price < 0.95 * moving_avg and lob['asks']['n'] > 0:
+            if self.job == 'Buy' and mid_price < 0.98 * moving_avg and lob['asks']['n'] > 0:
                 best_ask = lob['asks']['best']
                 if best_ask < self.balance:
                     bidprice = best_ask + 1  # Lift the ask
@@ -2628,7 +2634,7 @@ class TraderMeanReverter(Trader):
                     vstr += ", issued Bid @ %d" % bidprice
                 else:
                     vstr += ", can't afford best_ask=%d" % best_ask
-            elif self.job == 'Sell' and mid_price > 1.05 * moving_avg and lob['bids']['n'] > 0:
+            elif self.job == 'Sell' and mid_price > 1.02 * moving_avg and lob['bids']['n'] > 0:
                 askprice = self.last_purchase_price
                 if askprice is not None:
                     order = Order(self.tid, 'Ask', askprice, 1, time, lob['QID'])
@@ -2676,7 +2682,7 @@ class TraderRLAgent(Trader):
         self.q_table = np.zeros((2, 3, 3))  # Trend (up/down), balance (low/med/high), actions (buy/sell/hold)
         self.lr = 0.1
         self.gamma = 0.9
-        self.epsilon = 0.5
+        self.epsilon = 0.3
         self.last_state = None
         self.last_action = None
 
@@ -3002,7 +3008,7 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
     if n_proptraders > 0 and shuffle:
         shuffle_traders('P', n_proptraders, traders)
 
-    output_dir = 'base_output'
+    output_dir = 'output//base_output'
     os.makedirs(output_dir, exist_ok=True)
     if vrbs:
         for t in range(n_buyers):
@@ -3030,14 +3036,19 @@ def dump_strats_frame(time, strat_dump, traders):
             strat_dump.write('None,')
     strat_dump.write('\n')
 
-def blotter_dump(sess_id, traders):
+def blotter_dump(sess_id, traders, output_dir):
     for t in traders:
-        blotter_file = open(os.path.join(output_dir, f'{sess_id}_{t}_blotter.csv'), 'w')
-        blotter_file.write('Time,Price,Qty,Party1,Party2\n')
-        for trade in traders[t].blotter:
-            if trade['type'] == 'Trade':
-                blotter_file.write(f"{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
-        blotter_file.close()
+        filename = f'{sess_id}_{t}_blotter.csv'
+        if 'clotter' in filename:
+            filename = filename.replace('clotter', 'blotter')
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, filename), 'w') as blotter_file:
+            blotter_file.write('Time,Price,Qty,Party1,Party2\n')
+            for trade in traders[t].blotter:
+                if trade['type'] == 'Trade':
+                    blotter_file.write(f"{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
+            if not traders[t].blotter:
+                blotter_file.write('No trades\n')
 
 def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level=0.05):
     """
@@ -3260,21 +3271,18 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
 
 def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level):
     # Determine output directory based on trial type
-    if sess_id.startswith('baseline'):
-        output_dir = os.path.join('base_output')
-    else:
-        mix = f'mix_{hash(str(trader_spec))%1000:03d}'
-        output_dir = os.path.join('exp_output', mix, f'noise_{noise_level:.2f}')
-    
-    # Ensure output directory exists
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        if sess_vrbs:
-            print(f"Created/Verified output directory: {output_dir}")
-    except OSError as e:
-        print(f"Error creating output directory {output_dir}: {e}")
-        raise
+    parts = sess_id.split('_')
+    experiment_type = parts[0]  # baseline or experiment
+    mix_id = parts[1] if experiment_type == 'experiment' else 'mix_1'
+    noise_str = parts[2].replace('noise', '') if experiment_type == 'experiment' else '0.00'
+    output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}')
+    os.makedirs(output_dir, exist_ok=True)
+    if sess_vrbs:
+        print(f"Created/Verified output directory: {output_dir}")
 
+
+    # In market_session, before calling populate_market:
+    
     stats_buffer = []
 
     orders_verbose = False
@@ -3317,6 +3325,9 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
             print(f"Error opening tape_dump file: {e}")
             raise
         
+    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
+        log.write(f"Starting session: {sess_id}\n")
+
     exchange = Exchange()
     traders = {}
     trader_stats = populate_market(trader_spec, traders, True, populate_verbose)
@@ -3522,23 +3533,15 @@ if __name__ == "__main__":
     order_sched = {'sup': supply_schedule, 'dem': demand_schedule, 'interval': order_interval, 'timemode': 'drip-poisson'}
 
     verbose = False
-    dump_flags = {'dump_blotters': True, 'dump_lobs': False, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
+    dump_flags = {'dump_blotters': True, 'dump_lobs': True, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
 
     # Baseline trials
     baseline_trials = 15
     baseline_noise = 0.0
-    baseline_traders_spec = {
-        'buyers': [('ZIC', 10)],
-        'sellers': [('ZIC', 10)],
-        'proptraders': [('ZIC', 2)]
-    }
-    for t in range(baseline_trials):
-        trial_id = f'baseline_zic_{t:04d}'
-        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, baseline_noise)
+    baseline_traders_spec = {'buyers': [('ZIC', 10)], 'sellers': [('ZIC', 10)], 'proptraders': [('ZIC', 2)]}
 
     # Modified trials
     noise_levels = [0.0, 0.05, 0.1]
-    
     trader_mixes = [
         {'buyers': [('ZIC', 10)],
          'sellers': [('ZIC', 10)],
@@ -3549,16 +3552,51 @@ if __name__ == "__main__":
     ]
     n_trials_per_config = 15
 
+    total_trials = baseline_trials + len(noise_levels) * len(trader_mixes) * n_trials_per_config
+    print(f"Starting experiment with {total_trials} total trials")
+
+    # Baseline trials
+    for t in range(baseline_trials):
+        trial_id = f'baseline_mix_1_noise0.00_trial{t:04d}'
+        traders = {}  # Reset traders
+        trader_stats = populate_market(baseline_traders_spec, traders, True, False)
+        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, baseline_noise)
+
+    start_experiment = chrono.time()
+
+    debug_mode = False  # Set to True for quick testing
+    if debug_mode:
+        baseline_trials = 1
+        n_trials_per_config = 1
+        baseline_traders_spec = {'buyers': [('ZIC', 5)], 'sellers': [('ZIC', 5)], 'proptraders': [('ZIC', 1)]}
+        trader_mixes = [
+            {'buyers': [('ZIC', 5)], 'sellers': [('ZIC', 5)], 'proptraders': [('TrendFollower', 1), ('MeanReverter', 1)]},
+            {'buyers': [('ZIC', 5)], 'sellers': [('ZIC', 5)], 'proptraders': [('TrendFollower', 1), ('MeanReverter', 1), ('RLAgent', 1)]}
+        ]
+        end_time = 100.0  # Shorten session to 100 seconds
+        duration = end_time - start_time
+
+
+    # Experimental trials
+    trial_count = baseline_trials
     for noise in noise_levels:
-        for mix in trader_mixes:
-            # Initialize traders for this condition
+        for mix_idx, mix in enumerate(trader_mixes):
+            mix_id = 'mix_1' if len(mix['proptraders']) == 2 else 'mix_2'
             traders = {}
             trader_stats = populate_market(mix, traders, True, False)
-            # Reset RLAgent Q-table if present
             if 'RLAgent' in [t[0] for t in mix.get('proptraders', [])]:
                 for t in traders:
                     if traders[t].ttype == 'RLAgent':
                         traders[t].reset_q_table()
             for t in range(n_trials_per_config):
-                trial_id = f'bse_d001_i10_{(t + (int(noise * 100) // 5 * 15) + (1 if len(mix["proptraders"]) == 3 else 0) * 45):04d}'
+                trial_id = f'experiment_{mix_id}_noise{noise:.2f}_trial{t:04d}'
                 market_session(trial_id, start_time, end_time, mix, order_sched, dump_flags, verbose, noise)
+                trial_count += 1
+                percentage = (trial_count / total_trials) * 100
+                elapsed_time = chrono.time() - start_experiment
+                avg_time_per_trial = elapsed_time / trial_count
+                remaining_trials = total_trials - trial_count
+                est_time_remaining = remaining_trials * avg_time_per_trial
+                print(f"Trial {trial_count}/{total_trials} ({percentage:.1f}% complete, ~{est_time_remaining/60:.1f} min remaining)")
+
+
