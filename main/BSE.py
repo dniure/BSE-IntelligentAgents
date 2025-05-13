@@ -2856,15 +2856,14 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
     Create a bunch of traders from traders-specification.
     Optionally shuffles the pack of buyers and the pack of sellers.
     :param trdrs_spec: the specification of the population of traders.
-    :param traders: the list into which the newly-created traders traders will be written, as a return parameter
+    :param traders: the list into which the newly-created traders will be written, as a return parameter
     :param shuffle: whether to shuffle the ordering of buyers/sellers within the respective list.
     :param vrbs: verbosity Boolean: if True, print a running commentary; if False, stay silent.
-    :return: tuple (n_buyers, n_sellers)
+    :return: tuple (n_buyers, n_sellers, n_proptraders)
     """
     # trdrs_spec is a list of buyer-specs and a list of seller-specs
     # each spec is (<trader type>, <number of this type of trader>, optionally: <params for this type of trader>)
 
-    ## NEW MODIFICATION 
     def trader_type(robottype, name, parameters):
         """Create a newly instantiated trader of the designated type."""
         balance = 0.00
@@ -2901,8 +2900,8 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
         elif robottype == 'RLAgent':
             return TraderRLAgent('RLAgent', name, proptrader_balance, parameters, time0)
         else:
-            sys.exit('FATAL: don\'t know trader type %s\n' % robottype)        
-            
+            sys.exit('FATAL: don\'t know trader type %s\n' % robottype)
+
     def shuffle_traders(ttype_char, n, trader_list):
         """
         Shuffles the trader-I.D. character strings of the traders in trader_list
@@ -2918,73 +2917,56 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
             t2name = '%c%02d' % (ttype_char, t2)
             trader_list[t1name].tid = t2name
             trader_list[t2name].tid = t1name
-            temp = traders[t1name]
+            temp = trader_list[t1name]
             trader_list[t1name] = trader_list[t2name]
             trader_list[t2name] = temp
 
     def unpack_params(trader_params, mapping):
         """
         Unpack the parameters for those trader-types that have them
-        :param trader_params: the paramaters being passed to this trader.
+        :param trader_params: the parameters being passed to this trader.
         :param mapping: Boolean flag: if True, enable fitness-landscape-mapping; otherwise do nothing for mapping.
         :return: the dictionary of parameters for this trader.
         """
-
         parameters = None
-
-        if ttype == 'ZIPSH' or ttype == 'ZIP':
-            # parameters matter...
+        if trader_params is None:
+            return parameters
+        ttype = trader_params.get('ttype', '')
+        if ttype in ['ZIPSH', 'ZIP']:
             if mapping:
                 parameters = 'landscape-mapper'
-            elif trader_params is not None:
+            else:
                 parameters = trader_params.copy()
-                # trader-type determines type of optimizer used
-                if ttype == 'ZIPSH':
-                    parameters['optimizer'] = 'ZIPSH'
-                else:   # ttype=ZIP
-                    parameters['optimizer'] = None
-        if ttype == 'PRSH' or ttype == 'PRDE' or ttype == 'PRZI':
-            # parameters matter...
+                parameters['optimizer'] = 'ZIPSH' if ttype == 'ZIPSH' else None
+        elif ttype in ['PRSH', 'PRDE', 'PRZI']:
             if mapping:
                 parameters = 'landscape-mapper'
-            elif trader_params is not None:
-                # params determines type of optimizer used
+            elif trader_params:
                 if ttype == 'PRSH':
                     parameters = {'optimizer': 'PRSH', 'k': trader_params['k'],
                                   'strat_min': trader_params['s_min'], 'strat_max': trader_params['s_max']}
                 elif ttype == 'PRDE':
                     parameters = {'optimizer': 'PRDE', 'k': trader_params['k'],
                                   'strat_min': trader_params['s_min'], 'strat_max': trader_params['s_max']}
-                else:   # ttype=PRZI
+                else:  # ttype=PRZI
                     parameters = {'optimizer': None, 'k': 1,
                                   'strat_min': trader_params['s_min'], 'strat_max': trader_params['s_max']}
             else:
                 sys.exit('FAIL: PRZI/PRSH/PRDE trader needs one or more parameters to be specified')
-                
-        # for PT1/PT2 the parameters are optional...
-        # ...and are unpacked in __init__, so here they're just passed straight on through
-        if ttype == 'PT1':
+        elif ttype in ['PT1', 'PT2']:
             parameters = trader_params
-        if ttype == 'PT2':
-            parameters = trader_params
-
         return parameters
 
-    landscape_mapping = False   # set to true when mapping fitness landscape (for PRSH etc).
+    landscape_mapping = False  # set to true when mapping fitness landscape (for PRSH etc).
 
-    # the code that follows is a bit of a kludge, needs tidying up.
     n_buyers = 0
     for bs in trdrs_spec['buyers']:
         ttype = bs[0]
         for b in range(bs[1]):
             tname = 'B%02d' % n_buyers  # buyer i.d. string
-            if len(bs) > 2:
-                # third part of the buyer-spec is params for this trader-type
-                params = unpack_params(bs[2], landscape_mapping)
-            else:
-                params = unpack_params(None, landscape_mapping)
+            params = unpack_params(bs[2] if len(bs) > 2 else None, landscape_mapping)
             traders[tname] = trader_type(ttype, tname, params)
-            n_buyers = n_buyers + 1
+            n_buyers += 1
 
     if n_buyers < 1:
         sys.exit('FATAL: no buyers specified\n')
@@ -2996,14 +2978,10 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
     for ss in trdrs_spec['sellers']:
         ttype = ss[0]
         for s in range(ss[1]):
-            tname = 'S%02d' % n_sellers  # buyer i.d. string
-            if len(ss) > 2:
-                # third part of the buyer-spec is params for this trader-type
-                params = unpack_params(ss[2], landscape_mapping)
-            else:
-                params = unpack_params(None, landscape_mapping)
+            tname = 'S%02d' % n_sellers  # seller i.d. string
+            params = unpack_params(ss[2] if len(ss) > 2 else None, landscape_mapping)
             traders[tname] = trader_type(ttype, tname, params)
-            n_sellers = n_sellers + 1
+            n_sellers += 1
 
     if n_sellers < 1:
         sys.exit('FATAL: no sellers specified\n')
@@ -3012,24 +2990,20 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
         shuffle_traders('S', n_sellers, traders)
 
     n_proptraders = 0
-    if 'proptraders' in trdrs_spec and len(trdrs_spec['proptraders']) > 0:
+    if 'proptraders' in trdrs_spec and trdrs_spec['proptraders']:
         for pts in trdrs_spec['proptraders']:
             ttype = pts[0]
             for pt in range(pts[1]):
                 tname = 'P%02d' % n_proptraders  # proptrader i.d. string
-                if len(pts) > 2:
-                    # third part of the buyer-spec is params for this trader-type
-                    params = unpack_params(pts[2], landscape_mapping)
-                else:
-                    params = unpack_params(None, landscape_mapping)
+                params = unpack_params(pts[2] if len(pts) > 2 else None, landscape_mapping)
                 traders[tname] = trader_type(ttype, tname, params)
-                n_proptraders = n_proptraders + 1
-
-    # NB markets with zero proptraders don't cause a fatal error
+                n_proptraders += 1
 
     if n_proptraders > 0 and shuffle:
         shuffle_traders('P', n_proptraders, traders)
 
+    output_dir = 'base_output'
+    os.makedirs(output_dir, exist_ok=True)
     if vrbs:
         for t in range(n_buyers):
             tname = 'B%02d' % t
@@ -3040,6 +3014,10 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
         for t in range(n_proptraders):
             tname = 'P%02d' % t
             print(traders[tname])
+        print(f"Created {n_buyers} buyers, {n_sellers} sellers, {n_proptraders} proptraders")
+    
+    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
+        log.write(f"Session: {chrono.time()}, Buyers: {n_buyers}, Sellers: {n_sellers}, PropTraders: {n_proptraders}\n")
 
     return {'n_buyers': n_buyers, 'n_sellers': n_sellers, 'n_proptraders': n_proptraders}
 
@@ -3288,7 +3266,15 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
         mix = f'mix_{hash(str(trader_spec))%1000:03d}'
         output_dir = os.path.join('exp_output', mix, f'noise_{noise_level:.2f}')
     
-    os.makedirs(output_dir, exist_ok=True)
+    # Ensure output directory exists
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        if sess_vrbs:
+            print(f"Created/Verified output directory: {output_dir}")
+    except OSError as e:
+        print(f"Error creating output directory {output_dir}: {e}")
+        raise
+
     stats_buffer = []
 
     orders_verbose = False
@@ -3298,25 +3284,38 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     bookkeep_verbose = False
     populate_verbose = False
 
+    # Open dump files with error handling
+    strat_dump = None
     if dumpfile_flags['dump_strats']:
-        strat_dump = open(os.path.join(output_dir, sess_id + '_strats.csv'), 'w')
-    else:
-        strat_dump = None
+        try:
+            strat_dump = open(os.path.join(output_dir, f'{sess_id}_strats.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening strat_dump file: {e}")
+            raise
 
+    lobframes = None
     if dumpfile_flags['dump_lobs']:
-        lobframes = open(os.path.join(output_dir, sess_id + '_LOB_frames.csv'), 'w')
-    else:
-        lobframes = None
+        try:
+            lobframes = open(os.path.join(output_dir, f'{sess_id}_LOB_frames.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening lobframes file: {e}")
+            raise
 
+    avg_bals = None
     if dumpfile_flags['dump_avgbals']:
-        avg_bals = open(os.path.join(output_dir, sess_id + '_avg_balance.csv'), 'w')
-    else:
-        avg_bals = None
-        
+        try:
+            avg_bals = open(os.path.join(output_dir, f'{sess_id}_avg_balance.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening avg_bals file: {e}")
+            raise
+
+    tape_dump = None
     if dumpfile_flags['dump_tape']:
-        tape_dump = open(os.path.join(output_dir, sess_id + '_tape.csv'), 'w')
-    else:
-        tape_dump = None  
+        try:
+            tape_dump = open(os.path.join(output_dir, f'{sess_id}_tape.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening tape_dump file: {e}")
+            raise
         
     exchange = Exchange()
     traders = {}
@@ -3376,34 +3375,54 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
 
         time = time + timestep
    
+    # Handle no LOB frames
     if dumpfile_flags['dump_lobs'] and not frames_done:
         log_path = os.path.join(output_dir, f'{sess_id}_lob_log.txt')
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, 'w') as log:
-            log.write('No LOB frames written in this trial\n')   
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            with open(log_path, 'w') as log:
+                log.write('No LOB frames written in this trial\n')
+        except OSError as e:
+            print(f"Error writing lob_log file: {e}")
+            raise
 
+    # Write final stats and close avg_bals
     if dumpfile_flags['dump_avgbals']:
         stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)
         if stats_buffer:
-            avg_bals.writelines(stats_buffer)
-            avg_bals.flush()
-        avg_bals.close()
+            try:
+                avg_bals.writelines(stats_buffer)
+                avg_bals.flush()
+            except OSError as e:
+                print(f"Error writing to avg_bals file: {e}")
+                raise
+        if avg_bals:
+            avg_bals.close()
 
-    # Check for no trades and ensure log is written correctly
+    # Handle no trades
     if not exchange.tape:
         log_path = os.path.join(output_dir, f'{sess_id}_log.txt')
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, 'w') as log:
-            log.write('No trades occurred in this trial\n')
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            with open(log_path, 'w') as log:
+                log.write('No trades occurred in this trial\n')
+        except OSError as e:
+            print(f"Error writing log file: {e}")
+            raise
 
+    # Dump blotters with output_dir
     if dumpfile_flags['dump_blotters']:
-        blotter_dump(sess_id, traders)
+        blotter_dump(sess_id, traders, output_dir)
 
-    if dumpfile_flags['dump_strats']:
+    # Close remaining files
+    if dumpfile_flags['dump_strats'] and strat_dump:
         strat_dump.close()
 
-    if dumpfile_flags['dump_lobs']:
+    if dumpfile_flags['dump_lobs'] and lobframes:
         lobframes.close()
+
+    if dumpfile_flags['dump_tape'] and tape_dump:
+        tape_dump.close()
 
 #############################
 # # Below here is where we set up and run a whole series of experiments
