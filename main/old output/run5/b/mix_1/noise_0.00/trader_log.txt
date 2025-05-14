@@ -1,0 +1,15 @@
+Starting session: b_trial0000
+Starting session: b_trial0001
+Starting session: b_trial0002
+Starting session: b_trial0003
+Starting session: b_trial0004
+Starting session: b_trial0005
+Starting session: b_trial0006
+Starting session: b_trial0007
+Starting session: b_trial0008
+Starting session: b_trial0009
+Starting session: b_trial0010
+Starting session: b_trial0011
+Starting session: b_trial0012
+Starting session: b_trial0013
+Starting session: b_trial0014
