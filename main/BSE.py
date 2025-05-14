@@ -449,7 +449,7 @@ class Exchange(Orderbook):
         public_data['QID'] = self.quote_id
         public_data['tape'] = self.tape
 
-        if lob_file is not None and int(time) % 1 == 0:  # Write LOB frame every 1 second
+        if lob_file is not None and int(time) % 10 == 0:  # Write LOB frame every 10 seconds
             # build a linear character-string summary of only those prices on LOB with nonzero quantities
             lobstring = 'Bid:,'
             n_bids = len(self.bids.lob_anon)
@@ -2123,7 +2123,7 @@ class TraderPT1(Trader):
         :param time: the current time.
         """
         
-        init_verbose = True
+        init_verbose = False
         
         Trader.__init__(self, ttype, tid, balance, params, time)
         self.job = 'Buy'  # flag switches between 'Buy' & 'Sell'; shows what PT1 is currently trying to do
@@ -2337,7 +2337,7 @@ class TraderPT2(Trader):
         self.job = 'Buy'  # flag switches between 'Buy' & 'Sell'; shows what PT2 is currently trying to do
         self.last_purchase_price = None
         
-        init_verbose = True
+        init_verbose = False
 
         # Default parameter-values
         self.n_past_trades = 5      # how many recent trades used to compute average price (avg_p)?
@@ -3037,18 +3037,15 @@ def dump_strats_frame(time, strat_dump, traders):
     strat_dump.write('\n')
 
 def blotter_dump(sess_id, traders, output_dir):
-    for t in traders:
-        filename = f'{sess_id}_{t}_blotter.csv'
-        if 'clotter' in filename:
-            filename = filename.replace('clotter', 'blotter')
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, filename), 'w') as blotter_file:
-            blotter_file.write('Time,Price,Qty,Party1,Party2\n')
-            for trade in traders[t].blotter:
-                if trade['type'] == 'Trade':
-                    blotter_file.write(f"{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
-            if not traders[t].blotter:
-                blotter_file.write('No trades\n')
+        with open(os.path.join(output_dir, f'{sess_id}_blotter.csv'), 'w') as blotter_file:
+            blotter_file.write('TraderID,Time,Price,Qty,Party1,Party2\n')
+            for t in traders:
+                for trade in traders[t].blotter:
+                    if trade['type'] == 'Trade':
+                        blotter_file.write(f"{t},{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
+                if not traders[t].blotter:
+                    blotter_file.write(f"{t},No trades\n")
 
 def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level=0.05):
     """
@@ -3273,13 +3270,17 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     # Determine output directory based on trial type
     parts = sess_id.split('_')
     experiment_type = parts[0]  # baseline or experiment
-    mix_id = parts[1] if experiment_type == 'experiment' else 'mix_1'
-    noise_str = parts[2].replace('noise', '') if experiment_type == 'experiment' else '0.00'
+    # mix_id = parts[1] if experiment_type == 'experiment' else 'mix_1'
+    # noise_str = parts[2].replace('noise', '') if experiment_type == 'experiment' else '0.00'
+    # output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}')
+
+    mix_id = 'mix_1' if len(mix['proptraders']) == 2 else 'mix_2'
+    noise_str = f'{noise_level:.2f}'  # Ensure 0.00, 0.05, 0.10
     output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}')
+
     os.makedirs(output_dir, exist_ok=True)
     if sess_vrbs:
         print(f"Created/Verified output directory: {output_dir}")
-
 
     # In market_session, before calling populate_market:
     
@@ -3557,7 +3558,7 @@ if __name__ == "__main__":
 
     # Baseline trials
     for t in range(baseline_trials):
-        trial_id = f'baseline_mix_1_noise0.00_trial{t:04d}'
+        trial_id = f'b_trial{t:04d}'
         traders = {}  # Reset traders
         trader_stats = populate_market(baseline_traders_spec, traders, True, False)
         market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, baseline_noise)
@@ -3578,7 +3579,7 @@ if __name__ == "__main__":
 
 
     # Experimental trials
-    trial_count = baseline_trials
+    trial_count = 0
     for noise in noise_levels:
         for mix_idx, mix in enumerate(trader_mixes):
             mix_id = 'mix_1' if len(mix['proptraders']) == 2 else 'mix_2'

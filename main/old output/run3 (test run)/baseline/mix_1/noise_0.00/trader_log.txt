@@ -1,0 +1,15 @@
+Starting session: baseline_mix_1_noise0.00_trial0000
+Starting session: baseline_mix_1_noise0.00_trial0001
+Starting session: baseline_mix_1_noise0.00_trial0002
+Starting session: baseline_mix_1_noise0.00_trial0003
+Starting session: baseline_mix_1_noise0.00_trial0004
+Starting session: baseline_mix_1_noise0.00_trial0005
+Starting session: baseline_mix_1_noise0.00_trial0006
+Starting session: baseline_mix_1_noise0.00_trial0007
+Starting session: baseline_mix_1_noise0.00_trial0008
+Starting session: baseline_mix_1_noise0.00_trial0009
+Starting session: baseline_mix_1_noise0.00_trial0010
+Starting session: baseline_mix_1_noise0.00_trial0011
+Starting session: baseline_mix_1_noise0.00_trial0012
+Starting session: baseline_mix_1_noise0.00_trial0013
+Starting session: baseline_mix_1_noise0.00_trial0014
