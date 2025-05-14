@@ -1,0 +1,2 @@
+Session: 1747225186.1604962, Buyers: 10, Sellers: 10, PropTraders: 2
+Session: 1747225186.1608121, Buyers: 10, Sellers: 10, PropTraders: 2

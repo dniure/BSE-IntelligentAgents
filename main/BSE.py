@@ -59,6 +59,8 @@ import csv
 from datetime import datetime
 import numpy as np
 import time as chrono
+import time
+
 
 # a bunch of system constants (globals)
 bse_sys_minprice = 1                    # minimum price in the system, in cents/pennies
@@ -335,83 +337,54 @@ class Exchange(Orderbook):
             # neither bid nor ask?
             sys.exit('bad order type in del_quote()')
 
-    def process_order(self, time, order, tape_file, vrbs):
-        """
-        Process an order from a trader -- this is the BSE Matching Engine.
-        :param time: the current time.
-        :param order: the order to be processed.
-        :param tape_file: if is not None then write details of transaction to tape_file
-        :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
-        :return: transaction_record if the order results in a transaction, otherwise None.
-        """
-        # receive an order and either add it to the relevant LOB (ie treat as limit order)
-        # or if it crosses the best counterparty offer, execute it (treat as a market order)
-        oprice = order.price
-        counterparty = None
-        price = None
-        [qid, response] = self.add_order(order, vrbs)  # add it to the order lists -- overwriting any previous order
-        order.qid = qid
-        if vrbs:
-            print('QUID: order.quid=%d' % order.qid)
-            print('RESPONSE: %s' % response)
-        best_ask = self.asks.best_price
-        best_ask_tid = self.asks.best_tid
-        best_bid = self.bids.best_price
-        best_bid_tid = self.bids.best_tid
-        if order.otype == 'Bid':
-            if self.asks.n_orders > 0 and best_bid >= best_ask:
-                # bid lifts the best ask
-                if vrbs:
-                    print("Bid $%s lifts best ask" % oprice)
-                counterparty = best_ask_tid
-                price = best_ask  # bid crossed ask, so use ask price
-                if vrbs:
-                    print('counterparty, price', counterparty, price)
-                # delete the ask just crossed
-                self.asks.delete_best()
-                # delete the bid that was the latest order
-                self.bids.delete_best()
-        elif order.otype == 'Ask':
-            if self.bids.n_orders > 0 and best_ask <= best_bid:
-                # ask hits the best bid
-                if vrbs:
-                    print("Ask $%s hits best bid" % oprice)
-                # remove the best bid
-                counterparty = best_bid_tid
-                price = best_bid  # ask crossed bid, so use bid price
-                if vrbs:
-                    print('counterparty, price', counterparty, price)
-                # delete the bid just crossed, from the exchange's records
-                self.bids.delete_best()
-                # delete the ask that was the latest order, from the exchange's records
-                self.asks.delete_best()
-        else:
-            # we should never get here
-            sys.exit('process_order() given neither Bid nor Ask')
-        # NB at this point we have deleted the order from the exchange's records
-        # but the two traders concerned still have to be notified
-        if vrbs:
-            print('counterparty %s' % counterparty)
-        if counterparty is not None:
-            # process the trade
-            if vrbs:
-                print('>>>>>>>>>>>>>>>>>TRADE t=%010.3f $%d %s %s' % (time, price, counterparty, order.tid))
-            transaction_record = {'type': 'Trade',
-                                  'time': time,
-                                  'price': price,
-                                  'party1': counterparty,
-                                  'party2': order.tid,
-                                  'qty': order.qty
-                                  }
-            if tape_file is not None:
-                tape_file.write('TRD, %f, %d\n' % (time, price))
-            self.tape.append(transaction_record)
-            # right-truncate the tape so that it keeps only the most recent items
-            self.tape = self.tape[-self.tape_length:]
-
-            return transaction_record
-        else:
-            return None
+def process_order(self, time, order, tape_file, vrbs):
+    """
+    Process an order from a trader -- this is the BSE Matching Engine.
+    :param time: the current time.
+    :param order: the order to be processed.
+    :param tape_file: if not None, write minimal trade details to tape_file.
+    :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
+    :return: transaction_record if the order results in a transaction, otherwise None.
+    """
+    oprice = order.price
+    counterparty = None
+    price = None
+    [qid, response] = self.add_order(order, vrbs)
+    order.qid = qid
+    best_ask = self.asks.best_price
+    best_ask_tid = self.asks.best_tid
+    best_bid = self.bids.best_price
+    best_bid_tid = self.bids.best_tid
+    if order.otype == 'Bid':
+        if self.asks.n_orders > 0 and best_bid >= best_ask:
+            counterparty = best_ask_tid
+            price = best_ask
+            self.asks.delete_best()
+            self.bids.delete_best()
+    elif order.otype == 'Ask':
+        if self.bids.n_orders > 0 and best_ask <= best_bid:
+            counterparty = best_bid_tid
+            price = best_bid
+            self.bids.delete_best()
+            self.asks.delete_best()
+    else:
+        sys.exit('process_order() given neither Bid nor Ask')
+    
+    if counterparty is not None:
+        transaction_record = {
+            'type': 'Trade',
+            'time': time,
+            'price': price,
+            'party1': counterparty,
+            'party2': order.tid,
+            'qty': order.qty
+        }
+        if tape_file:
+            tape_file.write(f"{time:.3f},{price},{counterparty},{order.tid},{order.qty}\n")  # Minimal trade record
+        self.tape.append(transaction_record)
+        self.tape = self.tape[-self.tape_length:]
+        return transaction_record
+    return None    
 
     def tape_dump(self, fname, fmode, tmode):
         with open(fname, fmode) as dumpfile:
@@ -2906,8 +2879,17 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
 
     output_dir = os.path.join('output', 'baseline', 'mix_1', 'noise_0.00')
     os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
-        log.write(f"Session: {chrono.time()}, Buyers: {n_buyers}, Sellers: {n_sellers}, PropTraders: {n_proptraders}\n")
+    log_file = os.path.join(output_dir, 'trader_log.txt')
+    # Log only for unique session ID
+    session_id = trdrs_spec.get('session_id', str(time.time()))  # Use session_id from trdrs_spec or timestamp
+    try:
+        with open(log_file, 'r') as log:
+            existing_sessions = log.read()
+    except FileNotFoundError:
+        existing_sessions = ""
+    if session_id not in existing_sessions:
+        with open(log_file, 'a') as log:
+            log.write(f"Session: {session_id}, Buyers: {n_buyers}, Sellers: {n_sellers}, PropTraders: {n_proptraders}\n")
 
     if vrbs:
         print(f"Created {n_buyers} buyers, {n_sellers} sellers, {n_proptraders} proptraders")
@@ -3221,12 +3203,20 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
                 traders[trade['party2']].bookkeep(time, trade, order, bookkeep_verbose)
                 if dumpfile_flags['dump_avgbals']:
                     stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, None, lob_verbose), stats_buffer)
+                    # Flush buffer periodically to prevent memory buildup
+                    if len(stats_buffer) >= 100:
+                        avg_bals.writelines(stats_buffer)
+                        avg_bals.flush()
+                        stats_buffer.clear()
 
         # Write LOB frame every 10 seconds
         if dumpfile_flags['dump_lobs'] and time >= last_lob_write + 10.0:
-            exchange.publish_lob(time, lobframes, lob_verbose)
-            last_lob_write = time
-            frames_done.add(int(time))
+            lob = exchange.publish_lob(time, lobframes, lob_verbose)
+            if lob:  # Ensure LOB data is valid
+                last_lob_write = time
+                frames_done.add(int(time))
+            else:
+                print(f"Warning: Empty LOB at time {time}")
 
         lob = exchange.publish_lob(time, None, lob_verbose)
         for t in traders:
@@ -3234,10 +3224,11 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
 
         time += timestep
 
-    # Write final stats
+    # Write remaining stats
     if dumpfile_flags['dump_avgbals'] and stats_buffer:
         avg_bals.writelines(stats_buffer)
         avg_bals.flush()
+        stats_buffer.clear()
 
     # Handle no LOB frames
     if dumpfile_flags['dump_lobs'] and not frames_done:
