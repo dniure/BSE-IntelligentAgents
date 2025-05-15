@@ -2819,34 +2819,39 @@ class TraderNoise(Trader):
 
 
 def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
-    # Analyse the set of traders, to see what types we have
-    trader_types = {}
+    # Analyse traders by role and type
+    trader_types = {'Buyer': {}, 'Seller': {}, 'PropTrader': {}}
     for t in traders:
         ttype = traders[t].ttype
-        if ttype in trader_types.keys():
-            t_balance = trader_types[ttype]['balance_sum'] + traders[t].balance
-            n = trader_types[ttype]['n'] + 1
+        role = 'Buyer' if t.startswith('B') else 'Seller' if t.startswith('S') else 'PropTrader'
+        if ttype in trader_types[role]:
+            t_balance = trader_types[role][ttype]['balance_sum'] + traders[t].balance
+            n = trader_types[role][ttype]['n'] + 1
         else:
             t_balance = traders[t].balance
             n = 1
-        trader_types[ttype] = {'n': n, 'balance_sum': t_balance}
+        trader_types[role][ttype] = {'n': n, 'balance_sum': t_balance}
+
+    # Calculate MidPrice and Spread
+    bid = lob['bids']['best'] if lob['bids']['best'] is not None else None
+    ask = lob['asks']['best'] if lob['asks']['best'] is not None else None
+    midprice = (bid + ask) / 2 if bid is not None and ask is not None else None
+    spread = ask - bid if bid is not None and ask is not None else None
 
     # Buffer output
     if buffer is None:
         buffer = []
     line = f'{expid}, {time:06.2f}, '
-    if lob['bids']['best'] is not None:
-        line += f'{lob["bids"]["best"]}, '
-    else:
-        line += 'None, '
-    if lob['asks']['best'] is not None:
-        line += f'{lob["asks"]["best"]}, '
-    else:
-        line += 'None, '
-    for ttype in sorted(list(trader_types.keys())):
-        n = trader_types[ttype]['n']
-        s = trader_types[ttype]['balance_sum']
-        line += f'{ttype}, {s}, {n}, {s / float(n)}, '
+    line += f'{bid if bid is not None else "None"}, '
+    line += f'{ask if ask is not None else "None"}, '
+    line += f'{midprice if midprice is not None else "None"}, '
+    line += f'{spread if spread is not None else "None"}, '
+    for role in ['Buyer', 'Seller', 'PropTrader']:
+        for ttype in sorted(trader_types[role].keys()):
+            n = trader_types[role][ttype]['n']
+            s = trader_types[role][ttype]['balance_sum']
+            avg = s / float(n) if n > 0 else 0
+            line += f'{role}_{ttype}, {s}, {n}, {avg}, '
     line += '\n'
     buffer.append(line)
 
@@ -2878,7 +2883,7 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
         if robottype == 'GVWY':
             return TraderGiveaway('GVWY', name, balance, parameters, time0)
         elif robottype == 'ZIC':
-            return TraderZIC('ZIC', name, balance, parameters, time0)
+            return TraderZIC('ZIC', name, proptrader_balance if name.startswith('P') else balance, parameters, time0)
         elif robottype == 'SHVR':
             return TraderShaver('SHVR', name, balance, parameters, time0)
         elif robottype == 'SNPR':
@@ -3313,6 +3318,10 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     if dumpfile_flags['dump_avgbals']:
         try:
             avg_bals = open(os.path.join(output_dir, f'{sess_id}_avg_balance.csv'), 'w')
+            avg_bals.write('SessionID,Time,BidPrice,AskPrice,MidPrice,Spread,'
+                      'Buyer_ZIC_Balance,Buyer_ZIC_Count,Buyer_ZIC_Avg,'
+                      'Seller_ZIC_Balance,Seller_ZIC_Count,Seller_ZIC_Avg,'
+                      'PropTrader_ZIC_Balance,PropTrader_ZIC_Count,PropTrader_ZIC_Avg\n')
         except OSError as e:
             print(f"Error opening avg_bals file: {e}")
             raise
@@ -3335,6 +3344,8 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     session_duration = float(endtime - starttime)
     time = starttime
     pending_cust_orders = []
+    last_stats_time = starttime
+    stats_interval = 30.0  # Update stats every 30 seconds
 
     if sess_vrbs:
         print('\n%s;  ' % sess_id)
@@ -3348,7 +3359,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
             print('\n\n%s; t=%08.2f (%4.1f/100) ' % (sess_id, time, time_left*100))
 
         [pending_cust_orders, kills] = customer_orders(time, traders, trader_stats,
-                                                       order_schedule, pending_cust_orders, orders_verbose, noise_level)
+                                                    order_schedule, pending_cust_orders, orders_verbose, noise_level)
 
         if len(kills) > 0:
             for kill in kills:
@@ -3360,6 +3371,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
         if sess_vrbs:
             print('trader=%s order=%s' % (tid, order))
 
+        trade = None  # Initialize trade as None
         if order is not None:
             if order.otype == 'Ask' and order.price < traders[tid].orders[0].price:
                 sys.exit('Bad ask')
@@ -3370,19 +3382,23 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
             if trade is not None:
                 traders[trade['party1']].bookkeep(time, trade, order, bookkeep_verbose)
                 traders[trade['party2']].bookkeep(time, trade, order, bookkeep_verbose)
-                if dumpfile_flags['dump_avgbals']:
-                    stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)                
 
-            lob = exchange.publish_lob(time, lobframes, lob_verbose)
-            any_record_frame = False
-            for t in traders:
-                record_frame = traders[t].respond(time, lob, trade, respond_verbose)
-                if record_frame:
-                    any_record_frame = True
+        # Update stats at specified interval or if trade occurred
+        if dumpfile_flags['dump_avgbals']:
+            if trade is not None or (time >= last_stats_time + stats_interval and time < last_stats_time + stats_interval + timestep):
+                stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)
+                last_stats_time = time
 
-            if any_record_frame and dumpfile_flags['dump_strats']:
-                dump_strats_frame(time, strat_dump, traders)
-                frames_done.add(int(time))
+        lob = exchange.publish_lob(time, lobframes, lob_verbose)
+        any_record_frame = False
+        for t in traders:
+            record_frame = traders[t].respond(time, lob, trade, respond_verbose)
+            if record_frame:
+                any_record_frame = True
+
+        if any_record_frame and dumpfile_flags['dump_strats']:
+            dump_strats_frame(time, strat_dump, traders)
+            frames_done.add(int(time))
 
         time = time + timestep
    
@@ -3399,6 +3415,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
 
     # Write final stats and close avg_bals
     if dumpfile_flags['dump_avgbals']:
+    
         stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)
         if stats_buffer:
             try:
