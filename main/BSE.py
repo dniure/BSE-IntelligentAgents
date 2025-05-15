@@ -59,8 +59,6 @@ import csv
 from datetime import datetime
 import numpy as np
 import time as chrono
-import time
-
 
 # a bunch of system constants (globals)
 bse_sys_minprice = 1                    # minimum price in the system, in cents/pennies
@@ -337,54 +335,83 @@ class Exchange(Orderbook):
             # neither bid nor ask?
             sys.exit('bad order type in del_quote()')
 
-def process_order(self, time, order, tape_file, vrbs):
-    """
-    Process an order from a trader -- this is the BSE Matching Engine.
-    :param time: the current time.
-    :param order: the order to be processed.
-    :param tape_file: if not None, write minimal trade details to tape_file.
-    :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
-    :return: transaction_record if the order results in a transaction, otherwise None.
-    """
-    oprice = order.price
-    counterparty = None
-    price = None
-    [qid, response] = self.add_order(order, vrbs)
-    order.qid = qid
-    best_ask = self.asks.best_price
-    best_ask_tid = self.asks.best_tid
-    best_bid = self.bids.best_price
-    best_bid_tid = self.bids.best_tid
-    if order.otype == 'Bid':
-        if self.asks.n_orders > 0 and best_bid >= best_ask:
-            counterparty = best_ask_tid
-            price = best_ask
-            self.asks.delete_best()
-            self.bids.delete_best()
-    elif order.otype == 'Ask':
-        if self.bids.n_orders > 0 and best_ask <= best_bid:
-            counterparty = best_bid_tid
-            price = best_bid
-            self.bids.delete_best()
-            self.asks.delete_best()
-    else:
-        sys.exit('process_order() given neither Bid nor Ask')
-    
-    if counterparty is not None:
-        transaction_record = {
-            'type': 'Trade',
-            'time': time,
-            'price': price,
-            'party1': counterparty,
-            'party2': order.tid,
-            'qty': order.qty
-        }
-        if tape_file:
-            tape_file.write(f"{time:.3f},{price},{counterparty},{order.tid},{order.qty}\n")  # Minimal trade record
-        self.tape.append(transaction_record)
-        self.tape = self.tape[-self.tape_length:]
-        return transaction_record
-    return None    
+    def process_order(self, time, order, tape_file, vrbs):
+        """
+        Process an order from a trader -- this is the BSE Matching Engine.
+        :param time: the current time.
+        :param order: the order to be processed.
+        :param tape_file: if is not None then write details of transaction to tape_file
+        :param vrbs: verbosity: if True, print a running commentary; if False, stay silent.
+        :return: transaction_record if the order results in a transaction, otherwise None.
+        """
+        # receive an order and either add it to the relevant LOB (ie treat as limit order)
+        # or if it crosses the best counterparty offer, execute it (treat as a market order)
+        oprice = order.price
+        counterparty = None
+        price = None
+        [qid, response] = self.add_order(order, vrbs)  # add it to the order lists -- overwriting any previous order
+        order.qid = qid
+        if vrbs:
+            print('QUID: order.quid=%d' % order.qid)
+            print('RESPONSE: %s' % response)
+        best_ask = self.asks.best_price
+        best_ask_tid = self.asks.best_tid
+        best_bid = self.bids.best_price
+        best_bid_tid = self.bids.best_tid
+        if order.otype == 'Bid':
+            if self.asks.n_orders > 0 and best_bid >= best_ask:
+                # bid lifts the best ask
+                if vrbs:
+                    print("Bid $%s lifts best ask" % oprice)
+                counterparty = best_ask_tid
+                price = best_ask  # bid crossed ask, so use ask price
+                if vrbs:
+                    print('counterparty, price', counterparty, price)
+                # delete the ask just crossed
+                self.asks.delete_best()
+                # delete the bid that was the latest order
+                self.bids.delete_best()
+        elif order.otype == 'Ask':
+            if self.bids.n_orders > 0 and best_ask <= best_bid:
+                # ask hits the best bid
+                if vrbs:
+                    print("Ask $%s hits best bid" % oprice)
+                # remove the best bid
+                counterparty = best_bid_tid
+                price = best_bid  # ask crossed bid, so use bid price
+                if vrbs:
+                    print('counterparty, price', counterparty, price)
+                # delete the bid just crossed, from the exchange's records
+                self.bids.delete_best()
+                # delete the ask that was the latest order, from the exchange's records
+                self.asks.delete_best()
+        else:
+            # we should never get here
+            sys.exit('process_order() given neither Bid nor Ask')
+        # NB at this point we have deleted the order from the exchange's records
+        # but the two traders concerned still have to be notified
+        if vrbs:
+            print('counterparty %s' % counterparty)
+        if counterparty is not None:
+            # process the trade
+            if vrbs:
+                print('>>>>>>>>>>>>>>>>>TRADE t=%010.3f $%d %s %s' % (time, price, counterparty, order.tid))
+            transaction_record = {'type': 'Trade',
+                                  'time': time,
+                                  'price': price,
+                                  'party1': counterparty,
+                                  'party2': order.tid,
+                                  'qty': order.qty
+                                  }
+            if tape_file is not None:
+                tape_file.write('TRD, %f, %d\n' % (time, price))
+            self.tape.append(transaction_record)
+            # right-truncate the tape so that it keeps only the most recent items
+            self.tape = self.tape[-self.tape_length:]
+
+            return transaction_record
+        else:
+            return None
 
     def tape_dump(self, fname, fmode, tmode):
         with open(fname, fmode) as dumpfile:
@@ -422,7 +449,7 @@ def process_order(self, time, order, tape_file, vrbs):
         public_data['QID'] = self.quote_id
         public_data['tape'] = self.tape
 
-        if lob_file is not None and int(time) % 10 == 0:  # Write LOB frame every 10 seconds
+        if lob_file is not None and int(time) % 1 == 0:  # Write LOB frame every 1 second
             # build a linear character-string summary of only those prices on LOB with nonzero quantities
             lobstring = 'Bid:,'
             n_bids = len(self.bids.lob_anon)
@@ -2792,35 +2819,38 @@ class TraderNoise(Trader):
 
 
 def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
+    # Analyse the set of traders, to see what types we have
     trader_types = {}
     for t in traders:
         ttype = traders[t].ttype
-        balance = traders[t].balance
-        net_worth = balance
-        if hasattr(traders[t], 'last_purchase_price') and traders[t].last_purchase_price is not None:
-            net_worth += traders[t].last_purchase_price
-        if ttype in trader_types:
-            trader_types[ttype]['n'] += 1
-            trader_types[ttype]['balance_sum'] += balance
-            trader_types[ttype]['net_worth_sum'] += net_worth
+        if ttype in trader_types.keys():
+            t_balance = trader_types[ttype]['balance_sum'] + traders[t].balance
+            n = trader_types[ttype]['n'] + 1
         else:
-            trader_types[ttype] = {'n': 1, 'balance_sum': balance, 'net_worth_sum': net_worth}
+            t_balance = traders[t].balance
+            n = 1
+        trader_types[ttype] = {'n': n, 'balance_sum': t_balance}
 
+    # Buffer output
     if buffer is None:
         buffer = []
-    
-    bid_price = lob['bids']['best'] if lob['bids']['best'] is not None else 'None'
-    ask_price = lob['asks']['best'] if lob['asks']['best'] is not None else 'None'
-    mid_price = (lob['bids']['best'] + lob['asks']['best']) / 2.0 if lob['bids']['best'] is not None and lob['asks']['best'] is not None else 'None'
-    spread = (lob['asks']['best'] - lob['bids']['best']) if lob['bids']['best'] is not None and lob['asks']['best'] is not None else 'None'
+    line = f'{expid}, {time:06.2f}, '
+    if lob['bids']['best'] is not None:
+        line += f'{lob["bids"]["best"]}, '
+    else:
+        line += 'None, '
+    if lob['asks']['best'] is not None:
+        line += f'{lob["asks"]["best"]}, '
+    else:
+        line += 'None, '
+    for ttype in sorted(list(trader_types.keys())):
+        n = trader_types[ttype]['n']
+        s = trader_types[ttype]['balance_sum']
+        line += f'{ttype}, {s}, {n}, {s / float(n)}, '
+    line += '\n'
+    buffer.append(line)
 
-    for t in traders:
-        net_worth = traders[t].balance
-        if hasattr(traders[t], 'last_purchase_price') and traders[t].last_purchase_price is not None:
-            net_worth += traders[t].last_purchase_price
-        line = f'{expid},{time:.1f},{bid_price},{ask_price},{mid_price},{spread},{t},{traders[t].balance},{net_worth}\n'
-        buffer.append(line)
-
+    # Flush buffer if large
     if len(buffer) >= 100:
         dumpfile.writelines(buffer)
         dumpfile.flush()
@@ -2828,71 +2858,172 @@ def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
     return buffer
 
 def populate_market(trdrs_spec, traders, shuffle, vrbs):
+    """
+    Create a bunch of traders from traders-specification.
+    Optionally shuffles the pack of buyers and the pack of sellers.
+    :param trdrs_spec: the specification of the population of traders.
+    :param traders: the list into which the newly-created traders will be written, as a return parameter
+    :param shuffle: whether to shuffle the ordering of buyers/sellers within the respective list.
+    :param vrbs: verbosity Boolean: if True, print a running commentary; if False, stay silent.
+    :return: tuple (n_buyers, n_sellers, n_proptraders)
+    """
+    # trdrs_spec is a list of buyer-specs and a list of seller-specs
+    # each spec is (<trader type>, <number of this type of trader>, optionally: <params for this type of trader>)
+
     def trader_type(robottype, name, parameters):
+        """Create a newly instantiated trader of the designated type."""
         balance = 0.00
+        proptrader_balance = 500
         time0 = 0
-        if robottype == 'ZIC':
+        if robottype == 'GVWY':
+            return TraderGiveaway('GVWY', name, balance, parameters, time0)
+        elif robottype == 'ZIC':
             return TraderZIC('ZIC', name, balance, parameters, time0)
+        elif robottype == 'SHVR':
+            return TraderShaver('SHVR', name, balance, parameters, time0)
+        elif robottype == 'SNPR':
+            return TraderSniper('SNPR', name, balance, parameters, time0)
+        elif robottype == 'ZIP':
+            return TraderZIP('ZIP', name, balance, parameters, time0)
+        elif robottype == 'ZIPSH':
+            return TraderZIP('ZIPSH', name, balance, parameters, time0)
+        elif robottype == 'PRZI':
+            return TraderPRZI('PRZI', name, balance, parameters, time0)
+        elif robottype == 'PRSH':
+            return TraderPRZI('PRSH', name, balance, parameters, time0)
+        elif robottype == 'PRDE':
+            return TraderPRZI('PRDE', name, balance, parameters, time0)
+        elif robottype == 'PT1':
+            return TraderPT1('PT1', name, proptrader_balance, parameters, time0)
+        elif robottype == 'PT2':
+            return TraderPT2('PT2', name, proptrader_balance, parameters, time0)
+        elif robottype == 'NOISE':
+            return TraderNoise('NOISE', name, balance, parameters, time0)
+        elif robottype == 'TrendFollower':
+            return TraderTrendFollower('TrendFollower', name, proptrader_balance, parameters, time0)
+        elif robottype == 'MeanReverter':
+            return TraderMeanReverter('MeanReverter', name, proptrader_balance, parameters, time0)
+        elif robottype == 'RLAgent':
+            return TraderRLAgent('RLAgent', name, proptrader_balance, parameters, time0)
         else:
-            sys.exit(f'FATAL: Baseline only supports ZIC, got {robottype}\n')
+            sys.exit('FATAL: don\'t know trader type %s\n' % robottype)
+
+    def shuffle_traders(ttype_char, n, trader_list):
+        """
+        Shuffles the trader-I.D. character strings of the traders in trader_list
+        :param ttype_char: the lead character on the trader-I.D. strings (B for buyer, S for seller, etc)
+        :param n: how many traders of this type
+        :param trader_list: the list of traders in which the shuffling happens
+        :return: <nothing>
+        """
+        for swap in range(n):
+            t1 = (n - 1) - swap
+            t2 = random.randint(0, t1)
+            t1name = '%c%02d' % (ttype_char, t1)
+            t2name = '%c%02d' % (ttype_char, t2)
+            trader_list[t1name].tid = t2name
+            trader_list[t2name].tid = t1name
+            temp = trader_list[t1name]
+            trader_list[t1name] = trader_list[t2name]
+            trader_list[t2name] = temp
+
+    def unpack_params(trader_params, mapping):
+        """
+        Unpack the parameters for those trader-types that have them
+        :param trader_params: the parameters being passed to this trader.
+        :param mapping: Boolean flag: if True, enable fitness-landscape-mapping; otherwise do nothing for mapping.
+        :return: the dictionary of parameters for this trader.
+        """
+        parameters = None
+        if trader_params is None:
+            return parameters
+        ttype = trader_params.get('ttype', '')
+        if ttype in ['ZIPSH', 'ZIP']:
+            if mapping:
+                parameters = 'landscape-mapper'
+            else:
+                parameters = trader_params.copy()
+                parameters['optimizer'] = 'ZIPSH' if ttype == 'ZIPSH' else None
+        elif ttype in ['PRSH', 'PRDE', 'PRZI']:
+            if mapping:
+                parameters = 'landscape-mapper'
+            elif trader_params:
+                if ttype == 'PRSH':
+                    parameters = {'optimizer': 'PRSH', 'k': trader_params['k'],
+                                  'strat_min': trader_params['s_min'], 'strat_max': trader_params['s_max']}
+                elif ttype == 'PRDE':
+                    parameters = {'optimizer': 'PRDE', 'k': trader_params['k'],
+                                  'strat_min': trader_params['s_min'], 'strat_max': trader_params['s_max']}
+                else:  # ttype=PRZI
+                    parameters = {'optimizer': None, 'k': 1,
+                                  'strat_min': trader_params['s_min'], 'strat_max': trader_params['s_max']}
+            else:
+                sys.exit('FAIL: PRZI/PRSH/PRDE trader needs one or more parameters to be specified')
+        elif ttype in ['PT1', 'PT2']:
+            parameters = trader_params
+        return parameters
+
+    landscape_mapping = False  # set to true when mapping fitness landscape (for PRSH etc).
 
     n_buyers = 0
     for bs in trdrs_spec['buyers']:
         ttype = bs[0]
-        if ttype != 'ZIC':
-            sys.exit('FATAL: Baseline buyers must be ZIC\n')
         for b in range(bs[1]):
-            tname = 'B%02d' % n_buyers
-            traders[tname] = trader_type(ttype, tname, None)
+            tname = 'B%02d' % n_buyers  # buyer i.d. string
+            params = unpack_params(bs[2] if len(bs) > 2 else None, landscape_mapping)
+            traders[tname] = trader_type(ttype, tname, params)
             n_buyers += 1
+
+    if n_buyers < 1:
+        sys.exit('FATAL: no buyers specified\n')
+
+    if shuffle:
+        shuffle_traders('B', n_buyers, traders)
 
     n_sellers = 0
     for ss in trdrs_spec['sellers']:
         ttype = ss[0]
-        if ttype != 'ZIC':
-            sys.exit('FATAL: Baseline sellers must be ZIC\n')
         for s in range(ss[1]):
-            tname = 'S%02d' % n_sellers
-            traders[tname] = trader_type(ttype, tname, None)
+            tname = 'S%02d' % n_sellers  # seller i.d. string
+            params = unpack_params(ss[2] if len(ss) > 2 else None, landscape_mapping)
+            traders[tname] = trader_type(ttype, tname, params)
             n_sellers += 1
+
+    if n_sellers < 1:
+        sys.exit('FATAL: no sellers specified\n')
+
+    if shuffle:
+        shuffle_traders('S', n_sellers, traders)
 
     n_proptraders = 0
     if 'proptraders' in trdrs_spec and trdrs_spec['proptraders']:
         for pts in trdrs_spec['proptraders']:
             ttype = pts[0]
-            if ttype != 'ZIC':
-                sys.exit('FATAL: Baseline proptraders must be ZIC\n')
             for pt in range(pts[1]):
-                tname = 'P%02d' % n_proptraders
-                traders[tname] = trader_type(ttype, tname, None)
+                tname = 'P%02d' % n_proptraders  # proptrader i.d. string
+                params = unpack_params(pts[2] if len(pts) > 2 else None, landscape_mapping)
+                traders[tname] = trader_type(ttype, tname, params)
                 n_proptraders += 1
 
-    if shuffle:
-        for ttype, count in [('B', n_buyers), ('S', n_sellers), ('P', n_proptraders)]:
-            for swap in range(count):
-                t1 = count - 1 - swap
-                t2 = random.randint(0, t1)
-                t1name = f'{ttype}%02d' % t1
-                t2name = f'{ttype}%02d' % t2
-                traders[t1name].tid, traders[t2name].tid = t2name, t1name
-                traders[t1name], traders[t2name] = traders[t2name], traders[t1name]
+    if n_proptraders > 0 and shuffle:
+        shuffle_traders('P', n_proptraders, traders)
 
-    output_dir = os.path.join('output', 'baseline', 'mix_1', 'noise_0.00')
+    output_dir = 'output//base_output'
     os.makedirs(output_dir, exist_ok=True)
-    log_file = os.path.join(output_dir, 'trader_log.txt')
-    # Log only for unique session ID
-    session_id = trdrs_spec.get('session_id', str(time.time()))  # Use session_id from trdrs_spec or timestamp
-    try:
-        with open(log_file, 'r') as log:
-            existing_sessions = log.read()
-    except FileNotFoundError:
-        existing_sessions = ""
-    if session_id not in existing_sessions:
-        with open(log_file, 'a') as log:
-            log.write(f"Session: {session_id}, Buyers: {n_buyers}, Sellers: {n_sellers}, PropTraders: {n_proptraders}\n")
-
     if vrbs:
+        for t in range(n_buyers):
+            tname = 'B%02d' % t
+            print(traders[tname])
+        for t in range(n_sellers):
+            tname = 'S%02d' % t
+            print(traders[tname])
+        for t in range(n_proptraders):
+            tname = 'P%02d' % t
+            print(traders[tname])
         print(f"Created {n_buyers} buyers, {n_sellers} sellers, {n_proptraders} proptraders")
+    
+    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
+        log.write(f"Session: {chrono.time()}, Buyers: {n_buyers}, Sellers: {n_sellers}, PropTraders: {n_proptraders}\n")
 
     return {'n_buyers': n_buyers, 'n_sellers': n_sellers, 'n_proptraders': n_proptraders}
 
@@ -2906,15 +3037,18 @@ def dump_strats_frame(time, strat_dump, traders):
     strat_dump.write('\n')
 
 def blotter_dump(sess_id, traders, output_dir):
+    for t in traders:
+        filename = f'{sess_id}_{t}_blotter.csv'
+        if 'clotter' in filename:
+            filename = filename.replace('clotter', 'blotter')
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, f'{sess_id}_blotter.csv'), 'w') as blotter_file:
-            blotter_file.write('TraderID,Time,Price,Qty,Party1,Party2\n')
-            for t in traders:
-                for trade in traders[t].blotter:
-                    if trade['type'] == 'Trade':
-                        blotter_file.write(f"{t},{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
-                if not traders[t].blotter:
-                    blotter_file.write(f"{t},No trades\n")
+        with open(os.path.join(output_dir, filename), 'w') as blotter_file:
+            blotter_file.write('Time,Price,Qty,Party1,Party2\n')
+            for trade in traders[t].blotter:
+                if trade['type'] == 'Trade':
+                    blotter_file.write(f"{trade['time']},{trade['price']},{trade['qty']},{trade['party1']},{trade['party2']}\n")
+            if not traders[t].blotter:
+                blotter_file.write('No trades\n')
 
 def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level=0.05):
     """
@@ -3136,17 +3270,27 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
 ## NEW MODIFICATION
 
 def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level):
+    # Determine output directory based on trial type
+    print(f"session id: {sess_id}")
     parts = sess_id.split('_')
-    experiment_type = parts[0]  # 'baseline' or 'experiment'
-    mix_id = 'mix_1' if experiment_type == 'baseline' else parts[1]  # Ensure baseline uses mix_1
-    noise_str = f'{noise_level:.2f}'
-    output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}')
+    experiment_type = parts[0]  # baseline or experiment
+    mix_id = '_'.join(parts[1:3]) if experiment_type == 'experiment' else ''
+    noise_str = parts[3].replace('noise', '') if experiment_type == 'experiment' else ''
+
+    if (experiment_type == 'experiment'):
+        output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}')
+    else:
+        output_dir = os.path.join('output', experiment_type)
 
     os.makedirs(output_dir, exist_ok=True)
     if sess_vrbs:
         print(f"Created/Verified output directory: {output_dir}")
 
+
+    # In market_session, before calling populate_market:
+    
     stats_buffer = []
+
     orders_verbose = False
     lob_verbose = False
     process_verbose = False
@@ -3154,14 +3298,41 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     bookkeep_verbose = False
     populate_verbose = False
 
-    # Open dump files
-    strat_dump = open(os.path.join(output_dir, f'{sess_id}_strats.csv'), 'w') if dumpfile_flags['dump_strats'] else None
-    lobframes = open(os.path.join(output_dir, f'{sess_id}_LOB_frames.csv'), 'w') if dumpfile_flags['dump_lobs'] else None
-    avg_bals = open(os.path.join(output_dir, f'{sess_id}_avg_balance.csv'), 'w') if dumpfile_flags['dump_avgbals'] else None
-    tape_dump = open(os.path.join(output_dir, f'{sess_id}_tape.csv'), 'w') if dumpfile_flags['dump_tape'] else None
+    # Open dump files with error handling
+    strat_dump = None
+    if dumpfile_flags['dump_strats']:
+        try:
+            strat_dump = open(os.path.join(output_dir, f'{sess_id}_strats.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening strat_dump file: {e}")
+            raise
 
+    lobframes = None
+    if dumpfile_flags['dump_lobs']:
+        try:
+            lobframes = open(os.path.join(output_dir, f'{sess_id}_LOB_frames.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening lobframes file: {e}")
+            raise
+
+    avg_bals = None
     if dumpfile_flags['dump_avgbals']:
-        avg_bals.write('SessionID,Time,BidPrice,AskPrice,MidPrice,Spread,TraderID,Balance,NetWorth\n')
+        try:
+            avg_bals = open(os.path.join(output_dir, f'{sess_id}_avg_balance.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening avg_bals file: {e}")
+            raise
+
+    tape_dump = None
+    if dumpfile_flags['dump_tape']:
+        try:
+            tape_dump = open(os.path.join(output_dir, f'{sess_id}_tape.csv'), 'w')
+        except OSError as e:
+            print(f"Error opening tape_dump file: {e}")
+            raise
+        
+    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
+        log.write(f"Starting session: {sess_id}\n")
 
     exchange = Exchange()
     traders = {}
@@ -3170,18 +3341,20 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     session_duration = float(endtime - starttime)
     time = starttime
     pending_cust_orders = []
-    last_lob_write = -10.0  # Ensure first LOB frame is written
 
     if sess_vrbs:
-        print(f'\n{sess_id}; Traders: {trader_stats}')
+        print('\n%s;  ' % sess_id)
 
     frames_done = set()
 
     while time < endtime:
         time_left = (endtime - time) / session_duration
 
+        if sess_vrbs:
+            print('\n\n%s; t=%08.2f (%4.1f/100) ' % (sess_id, time, time_left*100))
+
         [pending_cust_orders, kills] = customer_orders(time, traders, trader_stats,
-                                                      order_schedule, pending_cust_orders, orders_verbose, noise_level)
+                                                       order_schedule, pending_cust_orders, orders_verbose, noise_level)
 
         if len(kills) > 0:
             for kill in kills:
@@ -3189,8 +3362,10 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
                     exchange.del_order(time, traders[kill].lastquote, None, sess_vrbs)
 
         tid = list(traders.keys())[random.randint(0, len(traders) - 1)]
-        order = traders[tid].getorder(time, time_left, exchange.publish_lob(time, None, lob_verbose))
-        
+        order = traders[tid].getorder(time, time_left, exchange.publish_lob(time, lobframes, lob_verbose))
+        if sess_vrbs:
+            print('trader=%s order=%s' % (tid, order))
+
         if order is not None:
             if order.otype == 'Ask' and order.price < traders[tid].orders[0].price:
                 sys.exit('Bad ask')
@@ -3202,83 +3377,219 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
                 traders[trade['party1']].bookkeep(time, trade, order, bookkeep_verbose)
                 traders[trade['party2']].bookkeep(time, trade, order, bookkeep_verbose)
                 if dumpfile_flags['dump_avgbals']:
-                    stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, None, lob_verbose), stats_buffer)
-                    # Flush buffer periodically to prevent memory buildup
-                    if len(stats_buffer) >= 100:
-                        avg_bals.writelines(stats_buffer)
-                        avg_bals.flush()
-                        stats_buffer.clear()
+                    stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)                
 
-        # Write LOB frame every 10 seconds
-        if dumpfile_flags['dump_lobs'] and time >= last_lob_write + 10.0:
             lob = exchange.publish_lob(time, lobframes, lob_verbose)
-            if lob:  # Ensure LOB data is valid
-                last_lob_write = time
+            any_record_frame = False
+            for t in traders:
+                record_frame = traders[t].respond(time, lob, trade, respond_verbose)
+                if record_frame:
+                    any_record_frame = True
+
+            if any_record_frame and dumpfile_flags['dump_strats']:
+                dump_strats_frame(time, strat_dump, traders)
                 frames_done.add(int(time))
-            else:
-                print(f"Warning: Empty LOB at time {time}")
 
-        lob = exchange.publish_lob(time, None, lob_verbose)
-        for t in traders:
-            traders[t].respond(time, lob, None, respond_verbose)
-
-        time += timestep
-
-    # Write remaining stats
-    if dumpfile_flags['dump_avgbals'] and stats_buffer:
-        avg_bals.writelines(stats_buffer)
-        avg_bals.flush()
-        stats_buffer.clear()
-
+        time = time + timestep
+   
     # Handle no LOB frames
     if dumpfile_flags['dump_lobs'] and not frames_done:
-        with open(os.path.join(output_dir, f'{sess_id}_lob_log.txt'), 'w') as log:
-            log.write('No LOB frames written in this trial\n')
+        log_path = os.path.join(output_dir, f'{sess_id}_lob_log.txt')
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            with open(log_path, 'w') as log:
+                log.write('No LOB frames written in this trial\n')
+        except OSError as e:
+            print(f"Error writing lob_log file: {e}")
+            raise
+
+    # Write final stats and close avg_bals
+    if dumpfile_flags['dump_avgbals']:
+        stats_buffer = trade_stats(sess_id, traders, avg_bals, time, exchange.publish_lob(time, lobframes, lob_verbose), stats_buffer)
+        if stats_buffer:
+            try:
+                avg_bals.writelines(stats_buffer)
+                avg_bals.flush()
+            except OSError as e:
+                print(f"Error writing to avg_bals file: {e}")
+                raise
+        if avg_bals:
+            avg_bals.close()
 
     # Handle no trades
     if not exchange.tape:
-        with open(os.path.join(output_dir, f'{sess_id}_log.txt'), 'w') as log:
-            log.write('No trades occurred in this trial\n')
+        log_path = os.path.join(output_dir, f'{sess_id}_log.txt')
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            with open(log_path, 'w') as log:
+                log.write('No trades occurred in this trial\n')
+        except OSError as e:
+            print(f"Error writing log file: {e}")
+            raise
 
-    # Dump blotters
+    # Dump blotters with output_dir
     if dumpfile_flags['dump_blotters']:
         blotter_dump(sess_id, traders, output_dir)
 
-    # Close files
-    for f in [strat_dump, lobframes, avg_bals, tape_dump]:
-        if f:
-            f.close()
+    # Close remaining files
+    if dumpfile_flags['dump_strats'] and strat_dump:
+        strat_dump.close()
+
+    if dumpfile_flags['dump_lobs'] and lobframes:
+        lobframes.close()
+
+    if dumpfile_flags['dump_tape'] and tape_dump:
+        tape_dump.close()
 
 #############################
 # # Below here is where we set up and run a whole series of experiments
 
 if __name__ == "__main__":
+
+    price_offset_filename = 'data//offset_BTC_USD_20250211.csv'
+
+    if len(sys.argv) > 1:
+        price_offset_filename = sys.argv[1]
+
     n_days = 1
     hours_in_a_day = 24
     start_time = 0.0
-    end_time = 60.0 * 60.0 * hours_in_a_day * n_days
+    # end_time = 60.0 * 60.0 * hours_in_a_day * n_days
+    end_time = 2000
     duration = end_time - start_time
 
-    range1 = (75, 110)
+
+    def schedule_offsetfn_read_file(filename, col_t, col_p, scale_factor=75):
+        vrbs = False
+        rwd_csv = csv.reader(open(filename, 'r'))
+        minprice = None
+        maxprice = None
+        firsttimeobj = None
+        timesincestart = 0
+        priceevents = []
+        first_row_is_header = True
+        this_is_first_row = True
+        this_is_first_data_row = True
+        first_date = None
+
+        for line in rwd_csv:
+            if this_is_first_row and first_row_is_header:
+                this_is_first_row = False
+                this_is_first_data_row = True
+                continue
+            row_date = line[col_t][:10]
+            if this_is_first_data_row:
+                first_date = row_date
+                this_is_first_data_row = False
+            if row_date != first_date:
+                continue
+            time = line[col_t][11:19]
+            if firsttimeobj is None:
+                firsttimeobj = datetime.strptime(time, '%H:%M:%S')
+            timeobj = datetime.strptime(time, '%H:%M:%S')
+            price_str = line[col_p]
+            price_str_no_commas = price_str.replace(',', '')
+            price = float(price_str_no_commas)
+            if minprice is None or price < minprice:
+                minprice = price
+            if maxprice is None or price > maxprice:
+                maxprice = price
+            timesincestart = (timeobj - firsttimeobj).total_seconds()
+            priceevents.append([timesincestart, price])
+
+        pricerange = maxprice - minprice
+        endtime = float(timesincestart)
+        offsetfn_eventlist = []
+        for event in priceevents:
+            normld_price = (event[1] - minprice) / pricerange
+            normld_price = min(normld_price, 1.0)
+            normld_price = max(0.0, normld_price)
+            price = int(round(normld_price * scale_factor))
+            normld_event = [event[0] / endtime, price]
+            offsetfn_eventlist.append(normld_event)
+        return offsetfn_eventlist
+
+    def schedule_offsetfn_from_eventlist(time, params):
+        final_time = float(params[0])
+        offset_events = params[1]
+        percent_elapsed = time / final_time
+        offset = None
+        for event in offset_events:
+            offset = event[1]
+            if percent_elapsed < event[0]:
+                break
+        return offset
+
+    def schedule_offsetfn_increasing_sinusoid(t, params):
+        if params is None:
+            pass
+        scale = -7500
+        multiplier = 7500000
+        offset = ((scale * t) / multiplier) * (1 + math.sin((t * t) / (multiplier * math.pi)))
+        return int(round(offset, 0))
+
+    offsetfn_events = None
+    if price_offset_filename is not None:
+        offsetfn_eventlist = schedule_offsetfn_read_file(price_offset_filename, 0, 1)
+        offsetfn_events = offsetfn_eventlist
+
+    range1 = (75, 110, (schedule_offsetfn_from_eventlist, [[end_time, offsetfn_events]]))
     supply_schedule = [{'from': start_time, 'to': end_time, 'ranges': [range1], 'stepmode': 'random'}]
-    range2 = (125, 90)
+    range2 = (125, 90, (schedule_offsetfn_from_eventlist, [[end_time, offsetfn_events]]))
     demand_schedule = [{'from': start_time, 'to': end_time, 'ranges': [range2], 'stepmode': 'random'}]
-    order_interval = 10
+    order_interval = 5
     order_sched = {'sup': supply_schedule, 'dem': demand_schedule, 'interval': order_interval, 'timemode': 'drip-poisson'}
 
     verbose = False
-    dump_flags = {'dump_blotters': True, 'dump_lobs': True, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
+    dump_flags = {'dump_blotters': True, 'dump_lobs': False, 'dump_strats': False, 'dump_avgbals': True, 'dump_tape': True}
 
-    baseline_trials = 15
-    baseline_noise = 0.0
+    # Modified trials
+    noise_levels = [0.0, 0.05, 0.1]
+    trader_mixes = [
+        {'buyers': [('ZIC', 10)],
+         'sellers': [('ZIC', 10)],
+         'proptraders': [('TrendFollower', 1), ('MeanReverter', 1)]},
+        {'buyers': [('ZIC', 10)],
+         'sellers': [('ZIC', 10)],
+         'proptraders': [('TrendFollower', 1), ('MeanReverter', 1), ('RLAgent', 1)]}
+    ]
+
     baseline_traders_spec = {'buyers': [('ZIC', 10)], 'sellers': [('ZIC', 10)], 'proptraders': [('ZIC', 2)]}
 
-    print(f"Starting baseline experiment with {baseline_trials} trials")
+    n_trials_per_config = 1
+    total_trials = n_trials_per_config + len(trader_mixes) * len(noise_levels) * n_trials_per_config
 
-    for t in range(baseline_trials):
+    # Baseline trials
+    print(f"-----------------------\n")
+    print(f"Completing Baseline:")
+    for t in range(n_trials_per_config):
+        print(f"{t+1}/{n_trials_per_config}")
         trial_id = f'baseline_mix_1_noise0.00_trial{t:04d}'
-        traders = {}
+        traders = {}  # Reset traders
         trader_stats = populate_market(baseline_traders_spec, traders, True, False)
-        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, baseline_noise)
-        print(f"Completed baseline trial {t+1}/{baseline_trials}")
+        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, 0.00)
+
+    start_experiment = chrono.time()
+
+    # Experimental trials
+    print(f"\nExperiment: {n_trials_per_config} trials")
+    trial_count = 0
+    for mix_idx, mix in enumerate(trader_mixes):
+        print(f"\n-- Mix {mix_idx+1} --------------")
+        for noise in noise_levels:
+            print(f"Completing Noise: {noise}")
+            mix_id = 'mix_1' if len(mix['proptraders']) == 2 else 'mix_2'
+            traders = {}
+            trader_stats = populate_market(mix, traders, True, False)
+            
+            if 'RLAgent' in [t[0] for t in mix.get('proptraders', [])]:
+                for t in traders:
+                    if traders[t].ttype == 'RLAgent':
+                        traders[t].reset_q_table()
+            
+            for t in range(n_trials_per_config):
+                trial_id = f'experiment_{mix_id}_noise{noise:.2f}_trial{t:04d}'
+                market_session(trial_id, start_time, end_time, mix, order_sched, dump_flags, verbose, noise)
+                trial_count += 1
+            trial_count = 0
 
