@@ -3008,8 +3008,6 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
     if n_proptraders > 0 and shuffle:
         shuffle_traders('P', n_proptraders, traders)
 
-    output_dir = 'output//base_output'
-    os.makedirs(output_dir, exist_ok=True)
     if vrbs:
         for t in range(n_buyers):
             tname = 'B%02d' % t
@@ -3022,9 +3020,6 @@ def populate_market(trdrs_spec, traders, shuffle, vrbs):
             print(traders[tname])
         print(f"Created {n_buyers} buyers, {n_sellers} sellers, {n_proptraders} proptraders")
     
-    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
-        log.write(f"Session: {chrono.time()}, Buyers: {n_buyers}, Sellers: {n_sellers}, PropTraders: {n_proptraders}\n")
-
     return {'n_buyers': n_buyers, 'n_sellers': n_sellers, 'n_proptraders': n_proptraders}
 
 def dump_strats_frame(time, strat_dump, traders):
@@ -3271,7 +3266,6 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
 
 def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level):
     # Determine output directory based on trial type
-    print(f"session id: {sess_id}")
     parts = sess_id.split('_')
     experiment_type = parts[0]  # baseline or experiment
     mix_id = '_'.join(parts[1:3]) if experiment_type == 'experiment' else ''
@@ -3331,7 +3325,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
             print(f"Error opening tape_dump file: {e}")
             raise
         
-    with open(os.path.join(output_dir, 'trader_log.txt'), 'a') as log:
+    with open(os.path.join(output_dir, 'trader_log.txt'), 'w') as log:
         log.write(f"Starting session: {sess_id}\n")
 
     exchange = Exchange()
@@ -3561,7 +3555,10 @@ if __name__ == "__main__":
 
     # Baseline trials
     print(f"-----------------------\n")
-    print(f"Completing Baseline:")
+
+    print(f"Experiment: {n_trials_per_config} trials")
+
+    print(f"\nCompleting Baseline:")
     for t in range(n_trials_per_config):
         print(f"{t+1}/{n_trials_per_config}")
         trial_id = f'baseline_mix_1_noise0.00_trial{t:04d}'
@@ -3572,7 +3569,6 @@ if __name__ == "__main__":
     start_experiment = chrono.time()
 
     # Experimental trials
-    print(f"\nExperiment: {n_trials_per_config} trials")
     trial_count = 0
     for mix_idx, mix in enumerate(trader_mixes):
         print(f"\n-- Mix {mix_idx+1} --------------")
