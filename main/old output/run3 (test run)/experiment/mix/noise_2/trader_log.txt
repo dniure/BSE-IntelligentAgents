@@ -1,3 +1,0 @@
-Starting session: experiment_mix_2_noise0.00_trial0000
-Starting session: experiment_mix_2_noise0.05_trial0000
-Starting session: experiment_mix_2_noise0.10_trial0000
