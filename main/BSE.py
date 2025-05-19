@@ -60,12 +60,6 @@ from datetime import datetime
 import numpy as np
 import time as chrono
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import glob
-
 # a bunch of system constants (globals)
 bse_sys_minprice = 1                    # minimum price in the system, in cents/pennies
 bse_sys_maxprice = 500                  # maximum price in the system, in cents/pennies
@@ -613,6 +607,13 @@ class Trader:
         self.profitpertime = self.profitpertime_update(time, self.birthtime, self.balance)
         return None
 
+    def is_prop_trader(self):
+        """
+        Checks whether the trader is a prop trader based on TID prefix.
+        :return: True if prop trader, else False
+        """
+        return str(self.tid).startswith('P')
+
 class TraderGiveaway(Trader):
     """
     Trader subclass Giveaway (GVWY): even dumber than a ZI-U: just give the deal away (but never make a loss)
@@ -735,40 +736,73 @@ class TraderShaver(Trader):
     Trader subclass Shaver: shaves a penny off the best price;
     but if there is no best price, creates "stub quote" at system max/min
     """
-
+    def __init__(self, ttype, name, balance, parameters, time0):
+        super().__init__(ttype, name, balance, parameters, time0)
+        self.time0 = time0
+        self.order_count = 0
+        self.no_order_count = 0
+        
     def getorder(self, time, countdown, lob):
-        """
-        Create this trader's order to be sent to the exchange.
-        :param time: the current time.
-        :param countdown: how much time before market close (not used by SHVR).
-        :param lob: the current state of the LOB.
-        :return: a new order from this trader.
-        """
-        # this test for negative countdown is purely to stop PyCharm warning about unused parameter value
+        # print(f"LOB: bids n={lob['bids']['n']}, asks n={lob['asks']['n']}")
+        # print(f"LOB worst: bids={lob['bids']['worst']}, asks={lob['asks']['worst']}")
+        # print(f"[{self.tid}] orders={self.orders}, len={len(self.orders)}")
+
         if countdown < 0:
             sys.exit('Negative countdown')
 
+        # If no orders exist, generate a decision based on market stats
         if len(self.orders) < 1:
-            order = None
-        else:
-            limitprice = self.orders[0].price
-            otype = self.orders[0].otype
-            if otype == 'Bid':
-                if lob['bids']['n'] > 0:
-                    quoteprice = lob['bids']['best'] + 1
-                    if quoteprice > limitprice:
-                        quoteprice = limitprice
+            self.no_order_count += 1
+            if lob['bids']['n'] > 0 and lob['asks']['n'] > 0:  # Market has liquidity
+                best_bid = lob['bids']['best']
+                best_ask = lob['asks']['best']
+                spread = best_ask - best_bid
+                if spread > 2:  # Ensure minimum profit potential (2 ticks)
+                    # Decide to buy (Bid) if can shave ask, or sell (Ask) if can shave bid
+                    otype = 'Bid' if random.random() < 0.5 else 'Ask'  # Random initial choice, could be strategy-based
+                    if otype == 'Bid':
+                        quoteprice = best_ask - 1  # Shave below best ask to buy
+                    else:
+                        quoteprice = best_bid + 1  # Shave above best bid to sell
+                    limitprice = quoteprice  # Initial limit matches quote for simplicity
                 else:
-                    quoteprice = lob['bids']['worst']
+                    return None  # No profitable opportunity
             else:
-                if lob['asks']['n'] > 0:
-                    quoteprice = lob['asks']['best'] - 1
-                    if quoteprice < limitprice:
-                        quoteprice = limitprice
-                else:
-                    quoteprice = lob['asks']['worst']
-            order = Order(self.tid, otype, quoteprice, self.orders[0].qty, time, lob['QID'])
-            self.lastquote = order
+                # Fallback to mid-price if LOB is thin
+                mid_price = 150
+                if lob['bids']['best'] and lob['asks']['best']:
+                    mid_price = (lob['bids']['best'] + lob['asks']['best']) / 2
+                otype = 'Bid' if random.random() < 0.5 else 'Ask'
+                quoteprice = int(mid_price + random.uniform(-5, 5))
+                quoteprice = max(bse_sys_minprice, min(bse_sys_maxprice, quoteprice))
+                limitprice = quoteprice
+            qty = 1
+            default_order = Order(self.tid, otype, limitprice, qty, time, lob['QID'])
+            self.orders = [default_order]
+            # print(f"[{self.tid}] Generated default order: {default_order}")
+
+        # Proceed with shaving logic using the existing or new order
+        limitprice = self.orders[0].price
+        otype = self.orders[0].otype
+        if otype == 'Bid':
+            if lob['bids']['n'] > 0:
+                quoteprice = lob['bids']['best'] + 1
+                if quoteprice > limitprice:
+                    quoteprice = limitprice
+            else:
+                quoteprice = lob['bids']['worst']
+        else:
+            if lob['asks']['n'] > 0:
+                quoteprice = lob['asks']['best'] - 1
+                if quoteprice < limitprice:
+                    quoteprice = limitprice
+            else:
+                quoteprice = lob['asks']['worst']
+
+        order = Order(self.tid, otype, quoteprice, self.orders[0].qty, time, lob['QID'])
+        self.lastquote = order
+        self.order_count += 1
+
         return order
 
 class TraderSniper(Trader):
@@ -2876,7 +2910,7 @@ def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
             prop_count += 1
             prop_balances[tid] = trader.balance
 
-    line = (f"{expid},{time:.2f},"
+    line = (f"{time:.2f},"
             f"{bid if bid is not None else ''},"
             f"{ask if bid is not None else ''},"
             f"{midprice if midprice is not None else ''},"
@@ -3282,7 +3316,7 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
     return [new_pending, cancellations]
 
 def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level):
-    # Determine output directory based on trial type
+
     parts = sess_id.split('_')
     experiment_type = parts[0]  # baseline or experiment
     mix_id = '_'.join(parts[1:3]) if experiment_type == 'experiment' else 'mix_1'
@@ -3344,6 +3378,11 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     exchange = Exchange()
     traders = {}
     trader_stats = populate_market(trader_spec, traders, True, populate_verbose)
+    for tid in traders:
+        if tid.startswith('P'):
+            initial_order = Order(tid, 'Bid' if random.random() < 0.5 else 'Ask', 150, 1, starttime, 0)
+            traders[tid].add_order(initial_order, populate_verbose)
+    
     # Debug: Log trader initialization
     log.write(f"Traders: {list(traders.keys())}\n")
     timestep = 1.0 / float(trader_stats['n_buyers'] + trader_stats['n_sellers'] + trader_stats['n_proptraders'])
@@ -3357,7 +3396,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     if dumpfile_flags['dump_avgbals']:
         try:
             avg_bals = open(os.path.join(output_dir, f'{sess_id}_avg_balance.csv'), 'w')
-            headers = ['SessionID', 'Time', 'BidPrice', 'AskPrice', 'MidPrice', 'Spread',
+            headers = ['time', 'bidPrice', 'askPrice', 'midPrice', 'spread',
                     'Buyer_ZIC_Balance', 'Buyer_ZIC_Count', 'Buyer_ZIC_Avg',
                     'Seller_ZIC_Balance', 'Seller_ZIC_Count', 'Seller_ZIC_Avg',
                     'PropTrader_ZIC_Balance', 'PropTrader_ZIC_Count', 'PropTrader_ZIC_Avg']
@@ -3389,12 +3428,14 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
 
         # Randomize trader selection, including prop traders
         tid = list(traders.keys())[random.randint(0, len(traders) - 1)]
+        
         order = traders[tid].getorder(time, time_left, exchange.publish_lob(time, lobframes, lob_verbose))
         if sess_vrbs:
             print('trader=%s order=%s' % (tid, order))
 
         trade = None  # Initialize trade as None
         if order is not None:
+            # print(f"order: {order}")
             if order.otype == 'Ask' and order.price < traders[tid].orders[0].price:
                 sys.exit('Bad ask')
             if order.otype == 'Bid' and order.price > traders[tid].orders[0].price:
@@ -3460,6 +3501,11 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
         except OSError as e:
             print(f"Error writing to blotters file: {e}")
             raise
+        
+    # for tid, trader in traders.items():
+    #     if isinstance(trader, TraderShaver):
+    #         print(f"Trader {tid} => Orders placed: {trader.order_count}, No orders: {trader.no_order_count}")
+
 
     # Close remaining files
     if log:
@@ -3471,82 +3517,6 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     if dumpfile_flags['dump_tape'] and tape_dump:
         tape_dump.close()
 
-def build_plots(trial_id, output_dir):
-    # Configuration
-    validation_dir = os.path.join(output_dir, 'plots')  # Use 'plots' subdirectory
-    os.makedirs(validation_dir, exist_ok=True)
-
-    # Load files
-    avg_balance_file = os.path.join(output_dir, f'{trial_id}_avg_balance.csv')
-    blotter_file = os.path.join(output_dir, f'{trial_id}_blotters.csv')
-    tape_file = os.path.join(output_dir, f'{trial_id}_tape.csv')
-
-    if not os.path.exists(avg_balance_file) or not os.path.exists(blotter_file) or not os.path.exists(tape_file):
-        print(f"Missing files for validation of {trial_id}")
-        return
-
-    avg_balance = pd.read_csv(avg_balance_file)
-    blotters = pd.read_csv(blotter_file)
-    tape = pd.read_csv(tape_file) if os.path.exists(tape_file) else pd.DataFrame({'type': [], 'time': [], 'price': []})
-
-    # Define proprietary traders
-    prop_traders = [tid for tid in avg_balance.columns if tid.startswith('P')]
-    trader_types = {tid: 'ZIC' for tid in prop_traders}  # Adjust based on actual trader types
-
-    # Extract trades
-    trade_counts = {}
-    for tid in prop_traders:
-        trades = blotters[blotters['tid'] == tid]
-        trade_counts[tid] = len(trades)
-
-    # Metrics
-    profits = {tid: (avg_balance[tid].iloc[-1] - 10000) for tid in prop_traders}
-    volatilities = {tid: avg_balance[tid].std() for tid in prop_traders}
-    price_std = tape['price'].std() if not tape.empty else 0
-
-    # Store results
-    results = []
-    for tid in prop_traders:
-        results.append({
-            'trial': trial_id,
-            'noise': '0.00' if 'noise0.00' in trial_id else trial_id.split('noise')[1].split('_')[0],
-            'mix': 'baseline' if 'baseline' in trial_id else trial_id.split('_')[1],
-            'trader_id': tid,
-            'trader_type': trader_types.get(tid, 'Unknown'),
-            'profit': profits[tid],
-            'volatility': volatilities[tid],
-            'trades': trade_counts.get(tid, 0),
-            'price_std': price_std
-        })
-
-    # Save results to CSV
-    results_df = pd.DataFrame(results)
-    results_df.to_csv(os.path.join(validation_dir, f'{trial_id}_validation_results.csv'), index=False)
-
-    # Plot 1: Balance over time
-    plt.figure(figsize=(10, 6))
-    for tid in prop_traders:
-        plt.plot(avg_balance['Time'], avg_balance[tid], label=f'{trader_types[tid]} ({tid})')
-    plt.title(f'Balance Over Time - {trial_id}')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Balance')
-    plt.legend()
-    plt.savefig(os.path.join(validation_dir, f'{trial_id}_balance.png'))
-    plt.close()
-
-    # Plot 2: Trade prices
-    plt.figure(figsize=(10, 6))
-    plt.scatter(tape['time'], tape['price'], s=10)
-    plt.title(f'Trade Prices - {trial_id}')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Price')
-    plt.savefig(os.path.join(validation_dir, f'{trial_id}_prices.png'))
-    plt.close()
-
-    # Summary plots (disabled for individual trials, can be re-enabled for aggregated analysis)
-    # ... (optional: re-add summary plots if needed across all trials)
-
-    print(results_df.groupby(['noise', 'mix', 'trader_type'])[['profit', 'volatility', 'trades', 'price_std']].mean())
 #############################
 # # Set up and run a whole series of experiments
 
@@ -3555,9 +3525,9 @@ if __name__ == "__main__":
 
     if len(sys.argv) > 1:
         price_offset_filename = sys.argv[1]
-        E
+
     start_time = 0.0
-    end_time = 3600
+    end_time = 86400
     duration = end_time - start_time
 
     def schedule_offsetfn_read_file(filename, col_t, col_p, scale_factor=75):
@@ -3659,10 +3629,12 @@ if __name__ == "__main__":
     ]
 
     baseline_traders_spec = {
-        'buyers': [('ZIC', 10)], 'sellers': [('ZIC', 10)], 'proptraders': [('ZIC', 2)]
+        'buyers': [('ZIC', 10)], 
+        'sellers': [('ZIC', 10)], 
+        'proptraders': [('SHVR', 2)]
     }
 
-    n_trials_per_config = 1
+    n_trials_per_config = 15
     total_trials = n_trials_per_config + len(trader_mixes) * len(noise_levels) * n_trials_per_config
 
     # Baseline trials
@@ -3678,7 +3650,7 @@ if __name__ == "__main__":
         traders = {}
         trader_stats = populate_market(baseline_traders_spec, traders, True, populate_verbose)
         market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, 0.00)
-        build_plots(trial_id, os.path.join('output', 'baseline'))
+        # build_plots(trial_id, os.path.join('output', 'baseline'))
         print(f"{t+1}/{n_trials_per_config} | {round(chrono.time()-config_duration_start)}s")
     
     # Experimental trials
