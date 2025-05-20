@@ -569,7 +569,7 @@ class Trader:
             profitpertime = totalprofit / self.profit_mintime
         return profitpertime
 
-    def bookkeep(self, time, trade, order, vrbs):
+    def bookkeep(self, time, trade, order, vrbs, lob=None):
         outstr = ""
         for ord in self.orders:
             outstr = outstr + str(ord)
@@ -591,6 +591,7 @@ class Trader:
         if vrbs:
             print('%s profit=%d balance=%d profit/time=%s' % (outstr, profit, self.balance, str(self.profitpertime)))
         self.del_order(order)
+        pass
 
     def respond(self, time, lob, trade, vrbs):
         """
@@ -680,7 +681,7 @@ class TraderZIC(Trader):
             if lob['bids']['best'] is not None and lob['asks']['best'] is not None:
                 mid_price = (lob['bids']['best'] + lob['asks']['best']) / 2
             if otype == 'Bid':
-                lower_bound = max(1, int(mid_price - 20))
+                lower_bound = max(1, int(mid_price - 10))
                 upper_bound = int(limit)
                 if lower_bound > upper_bound:
                     quoteprice = upper_bound
@@ -688,7 +689,7 @@ class TraderZIC(Trader):
                     quoteprice = random.randint(lower_bound, upper_bound)
             else:
                 lower_bound = int(limit)
-                upper_bound = min(500, int(mid_price + 20))
+                upper_bound = min(500, int(mid_price + 10))
                 if lower_bound > upper_bound:
                     quoteprice = lower_bound
                 else:
@@ -697,14 +698,7 @@ class TraderZIC(Trader):
         self.lastquote = order
         return order
 
-    def bookkeep(self, time, trade, order, vrbs):
-        """
-        Update trader's records of transactions, profit/loss, and blotter.
-        :param time: the current time.
-        :param trade: details of the transaction.
-        :param order: details of the customer order.
-        :param vrbs: verbosity flag.
-        """
+    def bookkeep(self, time, trade, order, vrbs, lob=None):
         # Initialize inventory for PropTraders
         if not hasattr(self, 'inventory'):
             self.inventory = 0
@@ -718,7 +712,7 @@ class TraderZIC(Trader):
             if order.otype == 'Sell' and self.inventory - order.qty < -self.max_inventory:
                 return  # Reject trade
 
-        super().bookkeep(time, trade, order, vrbs)  # Call parent to update blotter, balance, etc.
+        super().bookkeep(time, trade, order, vrbs, lob)  # Pass lob to parent
 
         # Update inventory for PropTraders
         if self.tid.startswith('P'):
@@ -726,6 +720,16 @@ class TraderZIC(Trader):
             # Cap balance
             if self.balance < self.min_balance:
                 self.balance = self.min_balance
+
+        # Add a new order immediately after a trade
+        if len(self.orders) == 0:
+            mid_price = 150
+            if lob and lob['bids']['best'] is not None and lob['asks']['best'] is not None:
+                mid_price = (lob['bids']['best'] + lob['asks']['best']) / 2
+            limit = random.randint(max(1, int(mid_price - 20)), min(500, int(mid_price + 20)))
+            otype = 'Bid' if order.otype == 'Buy' else 'Ask'
+            new_order = Order(self.tid, otype, limit, 1, time, lob['QID'] if lob else 0)
+            self.orders.append(new_order)
 
         if vrbs or self.tid.startswith('P'):
             profit = (self.orders[0].price - trade['price']) if self.orders[0].otype == 'Bid' else (trade['price'] - self.orders[0].price)
@@ -804,6 +808,14 @@ class TraderShaver(Trader):
         self.order_count += 1
 
         return order
+
+    def bookkeep(self, time, trade, order, vrbs, lob=None):
+        super().bookkeep(time, trade, order, vrbs, lob)
+        if self.tid.startswith('P'):
+            profit = (trade['price'] - order.price) if order.otype == 'Bid' else (order.price - trade['price'])
+            self.balance += profit  # Ensure balance reflects profit
+            if vrbs:
+                print(f"{self.tid}: profit={profit}, new balance={self.balance}")
 
 class TraderSniper(Trader):
     """
@@ -2635,7 +2647,7 @@ class TraderTrendFollower(Trader):
         if vrbs:
             print(vstr)
 
-    def bookkeep(self, time, trade, order, vrbs):
+    def bookkeep(self, time, trade, order, vrbs, lob=None):
         outstr = "%s t=%.2f, %s, %s, orders=%s" % (self.tid, time, self.ttype, self.job, self.orders)
         self.blotter.append(trade)
         transactionprice = trade['price']
@@ -2714,7 +2726,7 @@ class TraderMeanReverter(Trader):
         if vrbs:
             print(vstr)
 
-    def bookkeep(self, time, trade, order, vrbs):
+    def bookkeep(self, time, trade, order, vrbs, lob=None):
         outstr = "%s t=%.2f, %s, %s, orders=%s" % (self.tid, time, self.ttype, self.job, self.orders)
         self.blotter.append(trade)
         transactionprice = trade['price']
@@ -2813,41 +2825,41 @@ class TraderRLAgent(Trader):
         if vrbs:
             print(vstr)
 
-def bookkeep(self, time, trade, order, vrbs):
-    outstr = "%s t=%.2f, %s, %s, orders=%s" % (self.tid, time, self.ttype, self.job, self.orders)
-    self.blotter.append(trade)
-    transactionprice = trade['price']
-    reward = 0
-    if order.otype == 'Bid':
-        self.balance -= transactionprice
-        self.last_purchase_price = transactionprice
-        self.job = 'Sell'
-        reward = -transactionprice
-    elif order.otype == 'Ask':
-        self.balance += transactionprice
-        self.last_purchase_price = None
-        self.job = 'Buy'
-        reward = transactionprice - self.last_purchase_price if self.last_purchase_price is not None else 0
-    else:
-        sys.exit('FATAL in RL bookkeep(): bad order type\n')
-    if self.last_state is not None and self.last_action is not None:
-        trend, balance_bin = self.last_state
-        next_state = (trend, 0 if self.balance < 5000 else 1 if self.balance <= 15000 else 2)
-        self.q_table[trend, balance_bin, self.last_action] += self.lr * (
-            reward + self.gamma * np.max(self.q_table[next_state[0], next_state[1]]) -
-            self.q_table[trend, balance_bin, self.last_action]
-        )
-        self.epsilon = max(0.1, self.epsilon * 0.995)
-        # Log Q-table every 100 trades
-        if self.n_trades % 100 == 0:
-            with open(f'output/q_table_{self.tid}_{time:.0f}.txt', 'a') as f:
-                f.write(f"Time: {time}, Q-Table:\n{self.q_table}\n")
-    if vrbs:
-        net_worth = self.balance
-        if self.last_purchase_price is not None:
-            net_worth += self.last_purchase_price
-        print('%s, balance=%d, net_worth=%d' % (outstr, self.balance, net_worth))
-    self.del_order(order)
+    def bookkeep(self, time, trade, order, vrbs, lob=None):
+        outstr = "%s t=%.2f, %s, %s, orders=%s" % (self.tid, time, self.ttype, self.job, self.orders)
+        self.blotter.append(trade)
+        transactionprice = trade['price']
+        reward = 0
+        if order.otype == 'Bid':
+            self.balance -= transactionprice
+            self.last_purchase_price = transactionprice
+            self.job = 'Sell'
+            reward = -transactionprice
+        elif order.otype == 'Ask':
+            self.balance += transactionprice
+            self.last_purchase_price = None
+            self.job = 'Buy'
+            reward = transactionprice - self.last_purchase_price if self.last_purchase_price is not None else 0
+        else:
+            sys.exit('FATAL in RL bookkeep(): bad order type\n')
+        if self.last_state is not None and self.last_action is not None:
+            trend, balance_bin = self.last_state
+            next_state = (trend, 0 if self.balance < 5000 else 1 if self.balance <= 15000 else 2)
+            self.q_table[trend, balance_bin, self.last_action] += self.lr * (
+                reward + self.gamma * np.max(self.q_table[next_state[0], next_state[1]]) -
+                self.q_table[trend, balance_bin, self.last_action]
+            )
+            self.epsilon = max(0.1, self.epsilon * 0.995)
+            # Log Q-table every 100 trades
+            if self.n_trades % 100 == 0:
+                with open(f'output/q_table_{self.tid}_{time:.0f}.txt', 'a') as f:
+                    f.write(f"Time: {time}, Q-Table:\n{self.q_table}\n")
+        if vrbs:
+            net_worth = self.balance
+            if self.last_purchase_price is not None:
+                net_worth += self.last_purchase_price
+            print('%s, balance=%d, net_worth=%d' % (outstr, self.balance, net_worth))
+        self.del_order(order)
 
 class TraderNoise(Trader):
     """Trader that adds noise to ZIC strategy prices."""
@@ -3217,7 +3229,7 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
                 arrtime = trdr * tstep + tstep * random.random()
             elif timemode == 'drip-poisson':
                 # poisson requires a bit of extra work
-                interarrivaltime = random.expovariate(n_traders / interval)
+                interarrivaltime = random.expovariate(n_traders / (interval / 20))
                 arrtime += interarrivaltime
             else:
                 sys.exit('FAIL: unknown time-mode in getissuetimes()')
@@ -3272,7 +3284,7 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
         new_pending = []
 
         # demand side (buyers)
-        issuetimes = getissuetimes(n_buyers, orders_sched['timemode'], orders_sched['interval'], shuffle_times, True)
+        issuetimes = getissuetimes(n_buyers, orders_sched['timemode'], orders_sched['interval'] / 10, shuffle_times, True)
 
         ordertype = 'Bid'
         (sched, mode) = getschedmode(time, orders_sched['dem'])
@@ -3284,7 +3296,7 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
             new_pending.append(order)
 
         # supply side (sellers)
-        issuetimes = getissuetimes(n_sellers, orders_sched['timemode'], orders_sched['interval'], shuffle_times, True)
+        issuetimes = getissuetimes(n_sellers, orders_sched['timemode'], orders_sched['interval'] / 10, shuffle_times, True)
         ordertype = 'Ask'
         (sched, mode) = getschedmode(time, orders_sched['sup'])
         for t in range(n_sellers):
@@ -3322,10 +3334,11 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
     mix_id = '_'.join(parts[1:3]) if experiment_type == 'experiment' else 'mix_1'
     noise_str = parts[3].replace('noise', '') if experiment_type == 'experiment' else '0.00'
 
+    trial_num = parts[-1].replace('trial', '')
     if experiment_type == 'experiment':
-        output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}')
+        output_dir = os.path.join('output', experiment_type, mix_id, f'noise_{noise_str}', f'trial{trial_num}')
     else:
-        output_dir = os.path.join('output', experiment_type)
+        output_dir = os.path.join('output', experiment_type, f'trial{trial_num}')
 
     os.makedirs(output_dir, exist_ok=True)
     if sess_vrbs:
@@ -3443,9 +3456,10 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
             traders[tid].n_quotes = 1
             trade = exchange.process_order(time, order, tape_dump, process_verbose)
             if trade is not None and isinstance(trade, dict) and 'price' in trade:
-                traders[trade['party1']].bookkeep(time, trade, order, bookkeep_verbose)
-                traders[trade['party2']].bookkeep(time, trade, order, bookkeep_verbose)
-                log.write(f"Trade: time={time:.2f}, price={trade['price']}, party1={trade['party1']}, party2={trade['party2']}\n")           
+                lob = exchange.publish_lob(time, lobframes, lob_verbose)  # Get LOB state
+                traders[trade['party1']].bookkeep(time, trade, order, bookkeep_verbose, lob)  # Pass lob
+                traders[trade['party2']].bookkeep(time, trade, order, bookkeep_verbose, lob)  # Pass lob
+                log.write(f"Trade: time={time:.2f}, price={trade['price']}, party1={trade['party1']}, party2={trade['party2']}\n")          
 
         # Update stats strictly at 60s intervals or on trade
         if dumpfile_flags['dump_avgbals']:
@@ -3527,7 +3541,7 @@ if __name__ == "__main__":
         price_offset_filename = sys.argv[1]
 
     start_time = 0.0
-    end_time = 86400
+    end_time = 28800 # 8 Hours
     duration = end_time - start_time
 
     def schedule_offsetfn_read_file(filename, col_t, col_p, scale_factor=75):
@@ -3642,33 +3656,32 @@ if __name__ == "__main__":
     print(f"\n<<<<<<<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n")
 
     # Baseline trials
-    print(f"------- Baseline -------")
-    baseline_duration_start = chrono.time()
-    for t in range(n_trials_per_config):
-        config_duration_start = chrono.time()
-        trial_id = f'baseline_mix_1_noise0.00_trial{t:04d}'
-        traders = {}
-        trader_stats = populate_market(baseline_traders_spec, traders, True, populate_verbose)
-        market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, 0.00)
-        # build_plots(trial_id, os.path.join('output', 'baseline'))
-        print(f"{t+1}/{n_trials_per_config} | {round(chrono.time()-config_duration_start)}s")
+    # print(f"------- Baseline -------")
+    # baseline_duration_start = chrono.time()
+    # for t in range(n_trials_per_config):
+    #     config_duration_start = chrono.time()
+    #     trial_id = f'baseline_mix_1_noise0.00_trial{t:04d}'
+    #     traders = {}
+    #     trader_stats = populate_market(baseline_traders_spec, traders, True, populate_verbose)
+        # market_session(trial_id, start_time, end_time, baseline_traders_spec, order_sched, dump_flags, verbose, 0.00)
+    #     # build_plots(trial_id, os.path.join('output', 'baseline'))
+    #     print(f"{t+1}/{n_trials_per_config} | {round(chrono.time()-config_duration_start)}s")
     
     # Experimental trials
-    # for mix_idx, mix in enumerate(trader_mixes):
-    #     print(f"\n------- Mix {mix_idx+1} --------")
-    #     for noise in noise_levels:
-    #         noise_duration_start = chrono.time()
-    #         print(f"Completing Noise: {noise}")
-    #         mix_id = 'mix_1' if len(mix['proptraders']) == 2 else 'mix_2'
-    #         traders = {}
-    #         trader_stats = populate_market(mix, traders, True, populate_verbose)
-    #         if 'RLAgent' in [t[0] for t in mix.get('proptraders', [])]:
-    #             for t in traders:
-    #                 if traders[t].ttype == 'RLAgent':
-    #                     traders[t].reset_q_table()
-    #         for t in range(n_trials_per_config):
-    #             config_duration_start = chrono.time()
-    #             trial_id = f'experiment_{mix_id}_noise{noise:.2f}_trial{t:04d}'
-    #             market_session(trial_id, start_time, end_time, mix, order_sched, dump_flags, verbose, noise)
-    #             build_plots(trial_id, os.path.join('output', 'experiment', mix_id, f'noise_{noise:.2f}'))  # Add validation
-    #             print(f"{t+1}/{n_trials_per_config} | {round(chrono.time()-config_duration_start)}s")
+    for mix_idx, mix in enumerate(trader_mixes):
+        print(f"\n------- Mix {mix_idx+1} --------")
+        for noise in noise_levels:
+            noise_duration_start = chrono.time()
+            print(f"Completing Noise: {noise}")
+            mix_id = 'mix_1' if len(mix['proptraders']) == 2 else 'mix_2'
+            traders = {}
+            trader_stats = populate_market(mix, traders, True, populate_verbose)
+            if 'RLAgent' in [t[0] for t in mix.get('proptraders', [])]:
+                for t in traders:
+                    if traders[t].ttype == 'RLAgent':
+                        traders[t].reset_q_table()
+            for t in range(n_trials_per_config):
+                config_duration_start = chrono.time()
+                trial_id = f'experiment_{mix_id}_noise{noise:.2f}_trial{t:04d}'
+                market_session(trial_id, start_time, end_time, mix, order_sched, dump_flags, verbose, noise)
+                print(f"{t+1}/{n_trials_per_config} | {round(chrono.time()-config_duration_start)}s")
