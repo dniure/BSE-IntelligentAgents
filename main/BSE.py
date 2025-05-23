@@ -644,6 +644,7 @@ class TraderGiveaway(Trader):
             self.lastquote = order
         return order
 
+## Modified
 class TraderZIC(Trader):
     """
     Trader subclass ZI-C: after Gode & Sunder 1993
@@ -735,6 +736,7 @@ class TraderZIC(Trader):
             profit = (self.orders[0].price - trade['price']) if self.orders[0].otype == 'Bid' else (trade['price'] - self.orders[0].price)
             print(f"{self.tid}: bookkeep time={time:.2f}, trade_price={trade['price']}, profit={profit}, balance={self.balance}")
 
+## Modified
 class TraderShaver(Trader):
     """
     Trader subclass Shaver: shaves a penny off the best price;
@@ -2668,6 +2670,7 @@ class TraderTrendFollower(Trader):
             print('%s, balance=%d, net_worth=%d' % (outstr, self.balance, net_worth))
         self.del_order(order)
 
+## New Addition
 class TraderMeanReverter(Trader):
     def __init__(self, ttype, tid, balance, params, time):
         Trader.__init__(self, ttype, tid, balance, params, time)
@@ -2747,6 +2750,7 @@ class TraderMeanReverter(Trader):
             print('%s, balance=%d, net_worth=%d' % (outstr, self.balance, net_worth))
         self.del_order(order)
 
+## New Addition
 class TraderRLAgent(Trader):
     def __init__(self, ttype, tid, balance, params, time):
         Trader.__init__(self, ttype, tid, balance, params, time)
@@ -2861,6 +2865,7 @@ class TraderRLAgent(Trader):
             print('%s, balance=%d, net_worth=%d' % (outstr, self.balance, net_worth))
         self.del_order(order)
 
+## New Addition
 class TraderNoise(Trader):
     """Trader that adds noise to ZIC strategy prices."""
     def getorder(self, time, countdown, lob):
@@ -2887,6 +2892,7 @@ class TraderNoise(Trader):
     
 # #########################---Experiment/test-rig---##################
 
+## Modified
 def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
     if buffer is None:
         buffer = []
@@ -2942,6 +2948,7 @@ def trade_stats(expid, traders, dumpfile, time, lob, buffer=None):
         buffer.clear()
     return buffer
 
+## Modified
 def populate_market(trdrs_spec, traders, shuffle, vrbs):
     """
     Create a bunch of traders from traders-specification.
@@ -3110,6 +3117,7 @@ def dump_strats_frame(time, strat_dump, traders):
             strat_dump.write('None,')
     strat_dump.write('\n')
 
+## Modified
 def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, noise_level=0.05):
     """
     Generate a list of new customer-orders to be issued to the traders in the immediate/near future,
@@ -3327,6 +3335,7 @@ def customer_orders(time, traders, trader_stats, orders_sched, pending, vrbs, no
                 new_pending.append(order)
     return [new_pending, cancellations]
 
+## Modified
 def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dumpfile_flags, sess_vrbs, noise_level):
 
     parts = sess_id.split('_')
@@ -3534,6 +3543,7 @@ def market_session(sess_id, starttime, endtime, trader_spec, order_schedule, dum
 #############################
 # # Set up and run a whole series of experiments
 
+## Modified
 if __name__ == "__main__":
     price_offset_filename = 'data//offset_BTC_USD_20250211.csv'
 

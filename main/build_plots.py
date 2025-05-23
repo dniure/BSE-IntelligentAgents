@@ -23,53 +23,30 @@ def plot_aggregated_results(mix, noise, all_avg_balances, all_tapes, output_dir)
     plt.figure(figsize=(10, 6))
     for tid in prop_traders:
         plt.plot(avg_balance['time'], avg_balance[tid], label=f'Prop ({tid})')
-    plt.title(f'Average Prop Trader Balance Over Time - {mix}, Noise {noise}')
+    plt.title(f'Average Prop Trader Balance - {mix}, Noise {noise}')
     plt.xlabel('Time (seconds)')
     plt.ylabel('Balance')
     plt.legend()
-    plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_avg_balance.png'))
+    plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_balance.png'))
     plt.close()
 
-    # Plot 2: Trade prices (scatter all trades)
+    # Plot 2: Average bid-ask spread over time
+    plt.figure(figsize=(10, 6))
+    plt.plot(avg_balance['time'], avg_balance['spread'], label='Spread', color='red')
+    plt.title(f'Average Bid-Ask Spread - {mix}, Noise {noise}')
+    plt.xlabel('Time (seconds)')
+    plt.ylabel('Spread')
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_spread.png'))
+    plt.close()
+
+    # Plot 3: Trade prices (scatter all trades)
     plt.figure(figsize=(10, 6))
     plt.scatter(tape['time'], tape['price'], s=10, alpha=0.5)
     plt.title(f'Trade Prices - {mix}, Noise {noise}')
     plt.xlabel('Time (seconds)')
     plt.ylabel('Price')
     plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_trade_prices.png'))
-    plt.close()
-
-    # Plot 3: Average bid-ask spread over time
-    plt.figure(figsize=(10, 6))
-    plt.plot(avg_balance['time'], avg_balance['spread'], label='Spread', color='red')
-    plt.title(f'Average Bid-Ask Spread Over Time - {mix}, Noise {noise}')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Spread')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_avg_spread.png'))
-    plt.close()
-
-    # Plot 4: Average ZIC Buyer/Seller balances over time
-    plt.figure(figsize=(10, 6))
-    plt.plot(avg_balance['time'], avg_balance['Buyer_ZIC_Balance'], label='Buyer ZIC Balance', color='blue')
-    plt.plot(avg_balance['time'], avg_balance['Seller_ZIC_Balance'], label='Seller ZIC Balance', color='green')
-    plt.title(f'Average Buyer/Seller ZIC Balance Over Time - {mix}, Noise {noise}')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Balance')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_avg_buyer_seller_balance.png'))
-    plt.close()
-
-    # Plot 5: Average LOB prices over time
-    plt.figure(figsize=(10, 6))
-    plt.plot(avg_balance['time'], avg_balance['bidPrice'], label='Bid Price', color='blue')
-    plt.plot(avg_balance['time'], avg_balance['askPrice'], label='Ask Price', color='red')
-    plt.plot(avg_balance['time'], avg_balance['midPrice'], label='Mid Price', color='green')
-    plt.title(f'Average LOB Prices Over Time - {mix}, Noise {noise}')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Price')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, f'{mix}_noise{noise}_avg_lob_prices.png'))
     plt.close()
 
 def plot_summary_results(results_df, output_dir):
@@ -89,35 +66,6 @@ def plot_summary_results(results_df, output_dir):
     sns.boxplot(x='noise', y='profit', hue='trader_type', data=prop_df)
     plt.title('Profit by Noise and Trader Type (Prop Traders)')
     plt.savefig(os.path.join(output_dir, 'summary_profit.png'))
-    plt.close()
-
-    # Summary Plot 3: Price variance by noise and mix
-    plt.figure(figsize=(12, 8))
-    sns.boxplot(x='noise', y='price_std', hue='mix', data=results_df)
-    plt.title('Price Variance by Noise and Mix')
-    plt.savefig(os.path.join(output_dir, 'summary_price_variance.png'))
-    plt.close()
-
-    # Summary Plot 4: Spread by mix and noise
-    plt.figure(figsize=(12, 8))
-    sns.boxplot(x='noise', y='spread_avg', hue='mix', data=results_df)
-    plt.title('Spread Summary by Mix and Noise')
-    plt.savefig(os.path.join(output_dir, 'summary_spread.png'))
-    plt.close()
-
-    # Summary Plot 5: Buyer/Seller trade frequency
-    plt.figure(figsize=(12, 8))
-    buyer_seller_df = results_df[results_df['trader_id'].str.startswith(('B', 'S'))]
-    sns.barplot(x='noise', y='trades', hue='trader_id', data=buyer_seller_df)
-    plt.title('Buyer/Seller Trade Frequency by Noise')
-    plt.savefig(os.path.join(output_dir, 'summary_buyer_seller_trade_frequency.png'))
-    plt.close()
-
-    # Summary Plot 6: Buyer/Seller average balance
-    plt.figure(figsize=(12, 8))
-    sns.barplot(x='noise', y='avg_balance', hue='trader_id', data=buyer_seller_df)
-    plt.title('Buyer/Seller Average Balance by Noise')
-    plt.savefig(os.path.join(output_dir, 'summary_buyer_seller_avg_balance.png'))
     plt.close()
 
 def plot_baseline_results(base_path, output_dir):
@@ -216,29 +164,6 @@ def plot_baseline_results(base_path, output_dir):
     plt.savefig(os.path.join(output_dir, 'avg_spread.png'))
     plt.close()
 
-    # Plot 4: Average ZIC Buyer/Seller balances over time
-    plt.figure(figsize=(10, 6))
-    plt.plot(all_avg_balances['time'], all_avg_balances['Buyer_ZIC_Balance'], label='Buyer ZIC Balance', color='blue')
-    plt.plot(all_avg_balances['time'], all_avg_balances['Seller_ZIC_Balance'], label='Seller ZIC Balance', color='green')
-    plt.title('Average Buyer/Seller ZIC Balance Over Time - Baseline')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Balance')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, 'avg_buyer_seller_balance.png'))
-    plt.close()
-
-    # Plot 5: Average LOB prices over time
-    plt.figure(figsize=(10, 6))
-    plt.plot(all_avg_balances['time'], all_avg_balances['bidPrice'], label='Bid Price', color='blue')
-    plt.plot(all_avg_balances['time'], all_avg_balances['askPrice'], label='Ask Price', color='red')
-    plt.plot(all_avg_balances['time'], all_avg_balances['midPrice'], label='Mid Price', color='green')
-    plt.title('Average LOB Prices Over Time - Baseline')
-    plt.xlabel('Time (seconds)')
-    plt.ylabel('Price')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, 'avg_lob_prices.png'))
-    plt.close()
-
     return results_df
 
 if __name__ == "__main__":
@@ -335,13 +260,12 @@ if __name__ == "__main__":
             results_df = pd.concat([results_df, baseline_results_df])
 
         # Plot aggregated results for each mix and noise level
+        output_dir = os.path.join(experiment_base, 'plots')
         for mix in ['mix_1', 'mix_2']:
             for noise in ['0.00', '0.10', '0.20']:
-                output_dir = os.path.join(experiment_base, 'plots')
                 plot_aggregated_results(mix, noise, all_avg_balances, all_tapes, output_dir)
 
         # Plot summary results
-        output_dir = os.path.join(experiment_base, 'plots')
         plot_summary_results(results_df, output_dir)
 
         # Save results
